@@ -1,0 +1,19 @@
+{
+  "name": "@platform/observability",
+  "version": "0.0.1",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "lint": "eslint 'src/**/*.{ts,tsx}'",
+    "test": "echo \"(observability) no tests yet\""
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@platform/shared": "workspace:*",
+    "pino": "^9.3.2",
+    "pino-pretty": "^11.2.2"
+  }
+}
+

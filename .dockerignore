@@ -1,0 +1,11 @@
+.git
+.pids
+logs
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+**/.DS_Store
+apps/mobile/ios/Pods
+apps/mobile/android/.gradle
+infra/terraform/.terraform

@@ -1,0 +1,24 @@
+{
+  "name": "@services/discourse",
+  "version": "0.0.1",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -b",
+    "lint": "eslint 'src/**/*.{ts,tsx}'",
+    "test": "echo \"(discourse) no tests yet\"",
+    "migrate": "tsx src/migrate.ts"
+  },
+  "dependencies": {
+    "@fastify/swagger": "^8.14.0",
+    "@fastify/swagger-ui": "^4.2.0",
+    "@platform/events": "workspace:*",
+    "@platform/observability": "workspace:*",
+    "@platform/shared": "workspace:*",
+    "fastify": "^4.28.1",
+    "pg": "^8.12.0"
+  }
+}

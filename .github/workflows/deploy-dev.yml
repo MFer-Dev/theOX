@@ -1,0 +1,81 @@
+name: Deploy (dev)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: dev
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      TF_DIR: infra/terraform/environments/dev
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_STATE_TABLE: ${{ vars.TF_STATE_TABLE }}
+      TF_STATE_KEY: genme/dev/terraform.tfstate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install (for image builds)
+        run: pnpm install --frozen-lockfile
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform setup
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform init
+        working-directory: ${{ env.TF_DIR }}
+        run: |
+          terraform init \
+            -backend-config="bucket=${TF_STATE_BUCKET}" \
+            -backend-config="dynamodb_table=${TF_STATE_TABLE}" \
+            -backend-config="key=${TF_STATE_KEY}" \
+            -backend-config="region=${AWS_REGION}"
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build + push images
+        env:
+          TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          REG="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          for svc in gateway identity discourse purge cred endorse safety trustgraph; do
+            echo "Building @services/${svc}"
+            docker build \
+              -f infra/docker/Dockerfile.service \
+              --build-arg SERVICE_DIR="${svc}" \
+              -t "${REG}/genme-dev-${svc}:${TAG}" \
+              .
+            docker push "${REG}/genme-dev-${svc}:${TAG}"
+          done
+
+      - name: Terraform apply (roll ECS to new image tag)
+        working-directory: ${{ env.TF_DIR }}
+        run: terraform apply -auto-approve -var="image_tag=${GITHUB_SHA}"
+

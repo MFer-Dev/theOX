@@ -1,0 +1,28 @@
+FROM node:20-alpine AS base
+RUN corepack enable
+WORKDIR /repo
+
+FROM base AS deps
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+COPY platform ./platform
+COPY services ./services
+COPY workers ./workers
+COPY apps ./apps
+RUN pnpm -v && pnpm install --frozen-lockfile
+
+FROM deps AS build
+ARG SERVICE_DIR
+RUN test -n "$SERVICE_DIR"
+RUN pnpm --filter "@services/${SERVICE_DIR}..." build
+
+FROM node:20-alpine AS runtime
+ENV NODE_ENV=production
+WORKDIR /repo
+ARG SERVICE_DIR
+RUN test -n "$SERVICE_DIR"
+COPY --from=deps /repo/node_modules /repo/node_modules
+COPY --from=build /repo/platform /repo/platform
+COPY --from=build /repo/services /repo/services
+EXPOSE 4000
+CMD ["sh","-lc","node services/${SERVICE_DIR}/dist/index.js"]
+

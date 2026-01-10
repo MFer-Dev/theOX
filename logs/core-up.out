@@ -1,0 +1,25 @@
+Postgres reachable on localhost:5433
+scripts/dev/core-stack.sh: line 32: 90648 Terminated: 15          bash -c "pnpm --filter '@services/${name}' dev 2>&1 | tee '${log_file}'"
+scripts/dev/core-stack.sh: line 32:  8324 Terminated: 15          bash -c "pnpm --filter '@services/${name}' dev 2>&1 | tee '${log_file}'"
+scripts/dev/core-stack.sh: line 32: 23556 Terminated: 15          bash -c "pnpm --filter '@services/${name}' dev 2>&1 | tee '${log_file}'"
+scripts/dev/core-stack.sh: line 32: 25105 Terminated: 15          bash -c "pnpm --filter '@services/${name}' dev 2>&1 | tee '${log_file}'"
+scripts/dev/core-stack.sh: line 32: 26271 Terminated: 15          bash -c "pnpm --filter '@services/${name}' dev 2>&1 | tee '${log_file}'"
+scripts/dev/core-stack.sh: line 32: 31005 Terminated: 15          bash -c "pnpm --filter '@services/${name}' dev 2>&1 | tee '${log_file}'"
+scripts/dev/core-stack.sh: line 32: 72996 Terminated: 15          bash -c "pnpm --filter '@services/${name}' dev 2>&1 | tee '${log_file}'"
+Service identity ready at http://localhost:4001/readyz
+Service cred ready at http://localhost:4004/readyz
+Service discourse ready at http://localhost:4002/readyz
+Service purge ready at http://localhost:4003/readyz
+Service endorse ready at http://localhost:4005/readyz
+Service safety ready at http://localhost:4008/readyz
+Service trustgraph ready at http://localhost:4007/readyz
+Core stack started.
+Service URLs:
+  identity    http://localhost:4001
+  cred        http://localhost:4004
+  discourse   http://localhost:4002
+  purge       http://localhost:4003
+  endorse     http://localhost:4005
+  safety      http://localhost:4008
+  trustgraph  http://localhost:4007
+scripts/dev/core-stack.sh: line 120: syntax error near unexpected token `;;'

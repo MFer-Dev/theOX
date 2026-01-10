@@ -1,0 +1,15 @@
+diff --git a/android/src/main/java/com/facebook/react/uimanager/ViewManagerWithGeneratedInterface.java b/android/src/main/java/com/facebook/react/uimanager/ViewManagerWithGeneratedInterface.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..23da606ae1f513bdf7f35f42229a0aaedbf79618
+--- /dev/null
++++ b/android/src/main/java/com/facebook/react/uimanager/ViewManagerWithGeneratedInterface.java
+@@ -0,0 +1,9 @@
++package com.facebook.react.uimanager;
++
++/**
++ * Stub generated interface placeholder for codegen-dependent libraries.
++ * Provides compatibility when the generated interface is absent.
++ */
++public interface ViewManagerWithGeneratedInterface<T> {
++}
++

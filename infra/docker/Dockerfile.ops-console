@@ -1,0 +1,25 @@
+FROM node:20-alpine AS base
+RUN corepack enable
+WORKDIR /repo
+
+FROM base AS deps
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml turbo.json tsconfig.base.json ./
+COPY platform ./platform
+COPY apps ./apps
+RUN pnpm -v && pnpm install --frozen-lockfile
+
+FROM deps AS build
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN pnpm --filter "@apps/ops-console..." build
+
+# Next.js standalone output
+FROM node:20-alpine AS runtime
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+WORKDIR /app
+COPY --from=build /repo/apps/ops-console/.next/standalone ./
+COPY --from=build /repo/apps/ops-console/.next/static ./apps/ops-console/.next/static
+COPY --from=build /repo/apps/ops-console/public ./apps/ops-console/public
+EXPOSE 3000
+CMD ["node","apps/ops-console/server.js"]
+

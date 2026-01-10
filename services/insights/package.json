@@ -1,0 +1,24 @@
+{
+  "name": "@services/insights",
+  "version": "0.0.1",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -b",
+    "migrate": "tsx src/migrate.ts",
+    "lint": "eslint 'src/**/*.{ts,tsx}'"
+  },
+  "dependencies": {
+    "@fastify/swagger": "^8.14.0",
+    "@fastify/swagger-ui": "^4.2.0",
+    "@platform/shared": "workspace:*",
+    "@platform/events": "workspace:*",
+    "fastify": "^4.28.1",
+    "pg": "^8.12.0"
+  }
+}
+
+

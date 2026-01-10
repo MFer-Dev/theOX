@@ -1,0 +1,24 @@
+{
+  "name": "@services/notifications",
+  "version": "0.0.1",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -b",
+    "lint": "eslint 'src/**/*.{ts,tsx}'",
+    "test": "echo \"(notifications) no tests yet\"",
+    "migrate": "tsx src/migrate.ts",
+    "worker": "tsx src/worker.ts"
+  },
+  "dependencies": {
+    "@fastify/swagger": "^8.14.0",
+    "@fastify/swagger-ui": "^4.2.0",
+    "@platform/events": "workspace:*",
+    "@platform/observability": "workspace:*",
+    "@platform/shared": "workspace:*",
+    "fastify": "^4.28.1"
+  }
+}

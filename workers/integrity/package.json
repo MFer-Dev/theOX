@@ -1,0 +1,17 @@
+{
+  "name": "@workers/integrity",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -b",
+    "migrate": "tsx src/migrate.ts",
+    "lint": "eslint 'src/**/*.{ts,tsx}'"
+  },
+  "dependencies": {
+    "@platform/events": "workspace:*",
+    "@platform/shared": "workspace:*",
+    "pg": "^8.12.0"
+  }
+}
+

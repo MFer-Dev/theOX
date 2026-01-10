@@ -1,0 +1,8 @@
+packages:
+  - "apps/*"
+  - "services/*"
+  - "platform/*"
+  - "workers/*"
+  - "infra/*"
+  - "docs/*"
+

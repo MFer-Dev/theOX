@@ -1,0 +1,16 @@
+{
+  "name": "@platform/security",
+  "version": "0.0.1",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "lint": "eslint 'src/**/*.{ts,tsx}'",
+    "test": "echo \"(security) no tests yet\""
+  },
+  "dependencies": {
+    "@platform/shared": "workspace:*"
+  }
+}
+

@@ -1,0 +1,8 @@
+# Normalize line endings
+* text=auto eol=lf
+
+# Keep lockfiles stable
+pnpm-lock.yaml -diff
+yarn.lock -diff
+pnpm-workspace.yaml -diff
+

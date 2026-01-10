@@ -1,0 +1,27 @@
+{
+  "name": "@platform/shared",
+  "version": "0.0.1",
+  "private": true,
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "lint": "eslint 'src/**/*.{ts,tsx}'",
+    "test": "echo \"(shared) no tests yet\""
+  },
+  "dependencies": {
+    "@babel/runtime": "^7.25.0",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "pg": "^8.12.0",
+    "redis": "^4.6.13",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/pg": "^8.11.11",
+    "@types/redis": "^4.0.11",
+    "@types/uuid": "^9.0.7"
+  }
+}

@@ -1,0 +1,18 @@
+rootProject.name = 'GenMobile'
+def pnpmNodeModules = file("../../../node_modules")
+def nativeModulesGradle = fileTree(pnpmNodeModules) {
+    include "**/cli-platform-android/**/native_modules.gradle"
+}.files.find { it.name == "native_modules.gradle" }
+if (nativeModulesGradle == null) {
+    throw new GradleException("native_modules.gradle not found under $pnpmNodeModules; run pnpm install?")
+}
+apply from: nativeModulesGradle; applyNativeModulesSettingsGradle(settings)
+
+def rnGradlePluginBuild = fileTree(pnpmNodeModules) {
+    include "**/@react-native/gradle-plugin/**/build.gradle.kts"
+}.files.find { it.name == "build.gradle.kts" }
+if (rnGradlePluginBuild == null) {
+    throw new GradleException("react-native-gradle-plugin not found under $pnpmNodeModules; run pnpm install?")
+}
+include ':app'
+includeBuild(rnGradlePluginBuild.parentFile)

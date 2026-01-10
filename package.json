@@ -1,0 +1,38 @@
+{
+  "name": "genme",
+  "private": true,
+  "version": "0.0.1",
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "test": "turbo run test",
+    "dev:up": "docker compose up -d",
+    "dev:down": "docker compose down",
+    "smoke": "pnpm exec tsx scripts/smoke/run.ts",
+    "core:up": "bash scripts/dev/core-stack.sh up",
+    "core:down": "bash scripts/dev/core-stack.sh down",
+    "materializer:migrate": "pnpm --filter @workers/materializer migrate",
+    "materializer:dev": "pnpm --filter @workers/materializer dev",
+    "integrity:migrate": "pnpm --filter @workers/integrity migrate",
+    "integrity:dev": "pnpm --filter @workers/integrity dev"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.5",
+    "@typescript-eslint/eslint-plugin": "^7.16.1",
+    "@typescript-eslint/parser": "^7.16.1",
+    "concurrently": "^8.2.2",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.3.3",
+    "tsx": "^4.7.0",
+    "turbo": "2.7.2",
+    "typescript": "^5.5.4"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "react-native-gesture-handler@2.30.0": "patches/react-native-gesture-handler@2.30.0.patch"
+    }
+  }
+}
