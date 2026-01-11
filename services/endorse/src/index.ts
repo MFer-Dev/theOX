@@ -79,7 +79,6 @@ const getPurgeStatus = async () => {
 
 const spendCred = async (
   authHeader: string | undefined,
-  userId: string,
   correlationId?: string,
   idempotencyKey?: string,
 ) => {
@@ -109,6 +108,7 @@ app.post('/endorse', async (request, reply) => {
     reply.status(401);
     return { error: 'unauthorized' };
   }
+  const actorGeneration = auth.generation as GenerationCohort;
   await rateLimitMiddleware({ key: `endorse:${auth.sub}`, limit: 30, windowSec: 60 })(request, reply);
   const body = request.body as { entry_id: string; intent: EndorseIntent };
   if (!body.entry_id || !body.intent) {
@@ -119,23 +119,23 @@ app.post('/endorse', async (request, reply) => {
     reply.status(400);
     return { error: 'invalid intent' };
   }
+  const purge = await getPurgeStatus();
   const entry = await getEntry(body.entry_id);
-  if (!entry && !purge.active) {
+  if (!entry) {
     reply.status(404);
     return { error: 'entry not found' };
   }
-  const purge = await getPurgeStatus();
-  if (!purge.active && entry && entry.generation !== auth.generation) {
+  if (!purge.active && entry.generation !== actorGeneration) {
     reply.status(403);
     return { error: 'cross-gen endorsements blocked' };
   }
   const correlationId = request.headers['x-correlation-id'] as string | undefined;
   const idempotencyKey = request.headers['x-idempotency-key'] as string | undefined;
   const result = await withIdempotency(pool, idempotencyKey, async () => {
-    await spendCred(request.headers.authorization as string | undefined, auth.sub, correlationId, idempotencyKey);
+    await spendCred(request.headers.authorization as string | undefined, correlationId, idempotencyKey);
     const endRes = await pool.query(
       'insert into endorsements (entry_id, user_id, user_generation, intent) values ($1,$2,$3,$4) returning *',
-      [body.entry_id, auth.sub, auth.generation, body.intent],
+      [body.entry_id, auth.sub, actorGeneration, body.intent],
     );
     const evt = await appendEvent(
       'endorse.created',
@@ -143,10 +143,10 @@ app.post('/endorse', async (request, reply) => {
         endorsement_id: endRes.rows[0].id,
         entry_id: body.entry_id,
         intent: body.intent,
-        cross_gen: entry.generation !== auth.generation,
+        cross_gen: entry.generation !== actorGeneration,
       },
       auth.sub,
-      auth.generation,
+      actorGeneration,
       correlationId,
       idempotencyKey,
     );
