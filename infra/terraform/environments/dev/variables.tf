@@ -1,7 +1,7 @@
 variable "name" {
   type        = string
   description = "Environment name/prefix"
-  default     = "genme-dev"
+  default     = "trybl-dev"
 }
 
 variable "region" {
@@ -37,7 +37,7 @@ variable "private_subnets" {
 variable "media_bucket_name" {
   type        = string
   description = "S3 bucket for media"
-  default     = "genme-dev-media-example"
+  default     = "trybl-dev-media-example"
 }
 
 variable "media_cloudfront_enabled" {

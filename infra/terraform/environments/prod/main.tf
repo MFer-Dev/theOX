@@ -69,8 +69,8 @@ module "postgres" {
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 
-  db_name             = "genme"
-  username            = "genme"
+  db_name             = "trybl"
+  username            = "trybl"
   password            = random_password.db.result
   publicly_accessible = false
 

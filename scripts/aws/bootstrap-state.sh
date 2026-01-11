@@ -15,11 +15,23 @@ echo "Using region: ${AWS_REGION}"
 echo "State bucket: ${TF_STATE_BUCKET}"
 echo "Lock table:   ${TF_STATE_TABLE}"
 
-aws s3api create-bucket \
-  --bucket "${TF_STATE_BUCKET}" \
-  --region "${AWS_REGION}" \
-  $( [[ "${AWS_REGION}" == "us-east-1" ]] && echo "" || echo "--create-bucket-configuration LocationConstraint=${AWS_REGION}" ) \
-  >/dev/null 2>&1 || true
+if aws s3api head-bucket --bucket "${TF_STATE_BUCKET}" >/dev/null 2>&1; then
+  echo "Bucket already exists: ${TF_STATE_BUCKET}"
+else
+  echo "Creating bucket: ${TF_STATE_BUCKET}"
+  if [[ "${AWS_REGION}" == "us-east-1" ]]; then
+    aws s3api create-bucket \
+      --bucket "${TF_STATE_BUCKET}" \
+      --region "${AWS_REGION}" \
+      >/dev/null
+  else
+    aws s3api create-bucket \
+      --bucket "${TF_STATE_BUCKET}" \
+      --region "${AWS_REGION}" \
+      --create-bucket-configuration "LocationConstraint=${AWS_REGION}" \
+      >/dev/null
+  fi
+fi
 
 aws s3api put-bucket-versioning \
   --bucket "${TF_STATE_BUCKET}" \

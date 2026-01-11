@@ -17,15 +17,15 @@ Recommended minimum:
 
 ## 2) Bootstrap Terraform remote state (one-time per environment/account)
 Pick names (example):
-- `TF_STATE_BUCKET=genme-tf-state-dev`
-- `TF_STATE_TABLE=genme-tf-locks-dev`
+- `TF_STATE_BUCKET=trybl-tf-state-dev`
+- `TF_STATE_TABLE=trybl-tf-locks-dev`
 
 Run:
 
 ```bash
 AWS_REGION=us-east-1 \
-TF_STATE_BUCKET=genme-tf-state-dev \
-TF_STATE_TABLE=genme-tf-locks-dev \
+TF_STATE_BUCKET=trybl-tf-state-dev \
+TF_STATE_TABLE=trybl-tf-locks-dev \
 ./scripts/aws/bootstrap-state.sh
 ```
 
@@ -34,7 +34,7 @@ Run:
 
 ```bash
 AWS_REGION=us-east-1 \
-ROLE_NAME=genme-dev-github-deploy \
+ROLE_NAME=trybl-dev-github-deploy \
 GITHUB_OWNER=YOUR_GITHUB_ORG \
 GITHUB_REPO=YOUR_REPO_NAME \
 ./scripts/aws/bootstrap-github-oidc-role.sh
@@ -44,12 +44,21 @@ Copy the printed role ARN and store it in GitHub:
 - **Environment**: `dev`
 - **Secret**: `AWS_ROLE_ARN`
 
+## 3.5) Attach permissions to the deploy role (dev only)
+The bootstrap script creates the **trust** relationship; you still need permissions.
+
+Fastest dev unblock (NOT for production):
+
+```bash
+ROLE_NAME=trybl-dev-github-deploy ./scripts/aws/attach-admin-policy.sh
+```
+
 ## 4) Configure GitHub environment variables
 In GitHub → Settings → Environments → `dev`:
 - **Variables**
   - `AWS_REGION` (e.g. `us-east-1`)
-  - `TF_STATE_BUCKET` (e.g. `genme-tf-state-dev`)
-  - `TF_STATE_TABLE` (e.g. `genme-tf-locks-dev`)
+  - `TF_STATE_BUCKET` (e.g. `trybl-tf-state-dev`)
+  - `TF_STATE_TABLE` (e.g. `trybl-tf-locks-dev`)
 - **Secrets**
   - `AWS_ROLE_ARN` (from step 3)
 

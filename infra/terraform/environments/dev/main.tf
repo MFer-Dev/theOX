@@ -72,8 +72,8 @@ module "postgres" {
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
 
-  db_name             = "genme"
-  username            = "genme"
+  db_name             = "trybl"
+  username            = "trybl"
   password            = random_password.db.result
   publicly_accessible = false
 
@@ -134,7 +134,7 @@ resource "aws_secretsmanager_secret" "database_url" {
 
 resource "aws_secretsmanager_secret_version" "database_url" {
   secret_id     = aws_secretsmanager_secret.database_url.id
-  secret_string = "postgresql://genme:${random_password.db.result}@${module.postgres.address}:5432/genme"
+  secret_string = "postgresql://trybl:${random_password.db.result}@${module.postgres.address}:5432/trybl"
 }
 
 resource "aws_secretsmanager_secret" "redis_url" {

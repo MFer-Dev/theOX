@@ -19,7 +19,7 @@ jobs:
       TF_DIR: infra/terraform/environments/dev
       TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
       TF_STATE_TABLE: ${{ vars.TF_STATE_TABLE }}
-      TF_STATE_KEY: genme/dev/terraform.tfstate
+      TF_STATE_KEY: trybl/dev/terraform.tfstate
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +29,10 @@ jobs:
           cache: pnpm
 
       - name: Enable corepack
-        run: corepack enable
+        run: |
+          corepack enable
+          corepack prepare pnpm@9.12.0 --activate
+          pnpm --version
 
       - name: Install (for image builds)
         run: pnpm install --frozen-lockfile
@@ -70,9 +73,9 @@ jobs:
             docker build \
               -f infra/docker/Dockerfile.service \
               --build-arg SERVICE_DIR="${svc}" \
-              -t "${REG}/genme-dev-${svc}:${TAG}" \
+              -t "${REG}/trybl-dev-${svc}:${TAG}" \
               .
-            docker push "${REG}/genme-dev-${svc}:${TAG}"
+            docker push "${REG}/trybl-dev-${svc}:${TAG}"
           done
 
       - name: Terraform apply (roll ECS to new image tag)

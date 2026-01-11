@@ -15,3 +15,29 @@ android/app/build
 apps/mobile/android/app/build
 apps/mobile/ios/Pods
 
+# macOS
+**/.DS_Store
+
+# Local state
+.pids
+logs
+
+# React Native
+apps/mobile/android/.gradle
+apps/mobile/android/local.properties
+apps/mobile/ios/DerivedData
+apps/mobile/ios/build
+apps/mobile/ios/*.xcworkspace
+
+# Android Studio / IntelliJ
+*.iml
+.idea
+
+# Xcode
+*.xcuserstate
+*.xcuserdata
+
+# Terraform
+infra/terraform/.terraform
+infra/terraform/**/.terraform
+infra/terraform/**/.terraform.lock.hcl
