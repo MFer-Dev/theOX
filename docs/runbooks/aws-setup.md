@@ -53,6 +53,12 @@ Fastest dev unblock (NOT for production):
 ROLE_NAME=trybl-dev-github-deploy ./scripts/aws/attach-admin-policy.sh
 ```
 
+## If OIDC assume-role fails
+If Actions errors with `Not authorized to perform sts:AssumeRoleWithWebIdentity`, it’s almost always the role trust policy `sub` not matching.
+
+This repo uses a GitHub **Environment** named `dev`, so the trust policy must allow:
+- `repo:<owner>/<repo>:environment:dev`
+
 ## 4) Configure GitHub environment variables
 In GitHub → Settings → Environments → `dev`:
 - **Variables**

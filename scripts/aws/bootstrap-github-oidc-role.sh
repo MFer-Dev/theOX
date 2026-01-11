@@ -47,6 +47,7 @@ cat > /tmp/genme-github-trust.json <<EOF
         "StringLike": {
           "${OIDC_URL}:sub": [
             "repo:${GITHUB_OWNER}/${GITHUB_REPO}:ref:refs/heads/main",
+            "repo:${GITHUB_OWNER}/${GITHUB_REPO}:environment:dev",
             "repo:${GITHUB_OWNER}/${GITHUB_REPO}:pull_request"
           ]
         }
