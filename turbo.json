@@ -1,5 +1,4 @@
 {
-  "$comment": "Pinned to turbo 2.7.2; do not change schema without updating docs.",
   "$schema": "https://turbo.build/schema.json",
   "tasks": {
     "lint": {
