@@ -117,6 +117,16 @@ interface AgentEventPayload {
   [key: string]: unknown;
 }
 
+// Phase 6: Physics event payload
+interface PhysicsEventPayload {
+  deployment_target: string;
+  regime_name?: string;
+  weather_state: string;
+  vars: Record<string, unknown>;
+  reason?: string;
+  [key: string]: unknown;
+}
+
 // --- Observer Helpers (Axis 3) ---
 
 /**
@@ -919,6 +929,133 @@ const computeDeploymentDrift = async (
   }
 };
 
+// --- Phase 6: World State Projection Logic ---
+
+/**
+ * Get the 5-minute bucket start for a given timestamp.
+ */
+const get5MinBucketStart = (ts: Date): Date => {
+  const ms = ts.getTime();
+  const bucketMs = Math.floor(ms / (5 * 60 * 1000)) * (5 * 60 * 1000);
+  return new Date(bucketMs);
+};
+
+/**
+ * Project physics event to world state tables.
+ * Upserts current state, appends to history, updates rolling aggregates.
+ */
+const handlePhysicsEvent = async (event: EventEnvelope<PhysicsEventPayload>): Promise<void> => {
+  const payload = event.payload;
+  const deploymentTarget = payload.deployment_target;
+  const eventTs = new Date(event.occurred_at);
+
+  // 1. Upsert current world state
+  try {
+    await pool.query(
+      `insert into ox_world_state (deployment_target, regime_name, weather_state, vars_json, updated_at, source_event_id)
+       values ($1, $2, $3, $4, $5, $6)
+       on conflict (deployment_target)
+       do update set
+         regime_name = $2,
+         weather_state = $3,
+         vars_json = $4,
+         updated_at = $5,
+         source_event_id = $6`,
+      [
+        deploymentTarget,
+        payload.regime_name ?? null,
+        payload.weather_state,
+        JSON.stringify(payload.vars ?? {}),
+        eventTs,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.error({ err, event_id: event.event_id }, 'Failed to upsert world state');
+    throw err;
+  }
+
+  // 2. Append to world state history (idempotent)
+  try {
+    await pool.query(
+      `insert into ox_world_state_history (ts, deployment_target, regime_name, weather_state, vars_json, reason, source_event_id)
+       values ($1, $2, $3, $4, $5, $6, $7)
+       on conflict (source_event_id) do nothing`,
+      [
+        eventTs,
+        deploymentTarget,
+        payload.regime_name ?? null,
+        payload.weather_state,
+        JSON.stringify(payload.vars ?? {}),
+        payload.reason ?? null,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'World state history append warning');
+  }
+
+  // 3. Update rolling 5-minute effects aggregates
+  try {
+    const bucketStart = get5MinBucketStart(eventTs);
+
+    // Get recent effect stats for this bucket
+    const statsRes = await pool.query(
+      `select
+         count(*) filter (where type = 'agent.action_accepted') as accepted,
+         count(*) filter (where type = 'agent.action_rejected') as rejected,
+         count(distinct session_id) filter (where session_id is not null) as sessions,
+         jsonb_object_agg(
+           coalesce(summary_json->>'cognition_provider', 'none'),
+           count(*)
+         ) filter (where summary_json->>'cognition_provider' is not null) as providers,
+         avg((summary_json->>'cost')::numeric) filter (where summary_json->>'cost' is not null) as avg_cost
+       from ox_live_events
+       where deployment_target = $1
+         and ts >= $2
+         and ts < $2 + interval '5 minutes'`,
+      [deploymentTarget, bucketStart],
+    );
+
+    const stats = statsRes.rows[0] ?? {};
+
+    // Get artifact count for this bucket
+    const artifactRes = await pool.query(
+      `select count(*) as count
+       from ox_artifacts
+       where deployment_target = $1
+         and created_at >= $2
+         and created_at < $2 + interval '5 minutes'`,
+      [deploymentTarget, bucketStart],
+    );
+
+    await pool.query(
+      `insert into ox_world_effects_5m (bucket_start, deployment_target, accepted_count, rejected_count, sessions_created, artifacts_created, cognition_provider_counts, avg_requested_cost)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (bucket_start, deployment_target)
+       do update set
+         accepted_count = $3,
+         rejected_count = $4,
+         sessions_created = $5,
+         artifacts_created = $6,
+         cognition_provider_counts = $7,
+         avg_requested_cost = $8`,
+      [
+        bucketStart,
+        deploymentTarget,
+        Number(stats.accepted ?? 0),
+        Number(stats.rejected ?? 0),
+        Number(stats.sessions ?? 0),
+        Number(artifactRes.rows[0]?.count ?? 0),
+        JSON.stringify(stats.providers ?? {}),
+        stats.avg_cost ?? null,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'World effects aggregate update warning');
+  }
+};
+
 // --- Capacity timeline projection logic (Phase D) ---
 
 /**
@@ -1112,14 +1249,25 @@ const handleEvent = async (event: EventEnvelope<AgentEventPayload>): Promise<voi
 
 const startConsumer = async () => {
   try {
+    // Consumer for agent events
     await runConsumer({
       groupId: 'ox-read-materializer',
       topics: ['events.agents.v1'],
       handler: handleEvent,
       dlq: true,
     });
-    consumerInitialized = true;
     app.log.info('OX Read consumer started for events.agents.v1');
+
+    // Consumer for physics events (Phase 6)
+    await runConsumer({
+      groupId: 'ox-read-physics-materializer',
+      topics: ['events.ox_physics.v1'],
+      handler: handlePhysicsEvent,
+      dlq: true,
+    });
+    app.log.info('OX Read consumer started for events.ox_physics.v1');
+
+    consumerInitialized = true;
   } catch (err) {
     app.log.error({ err }, 'Failed to start consumer');
   }
@@ -1833,6 +1981,209 @@ app.get('/ox/environment/:target/rejections', async (request, reply) => {
       environment_state: row.environment_state_json,
       source_event_id: row.source_event_id,
       rejected_at: row.rejected_at,
+    })),
+  };
+});
+
+// --- Phase 6: World State Endpoints ---
+
+// Get all current world states
+app.get('/ox/world', async (request) => {
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  const res = await pool.query(
+    `select deployment_target, regime_name, weather_state, vars_json, updated_at
+     from ox_world_state
+     order by deployment_target`,
+  );
+
+  await logObserverAccess('/ox/world', {}, res.rowCount ?? 0, observerId, observerRole);
+
+  // Apply observer role gating
+  // Viewer: summary only (regime, weather, no vars_json)
+  // Analyst: + vars_json
+  // Auditor: everything
+  return {
+    world_states: res.rows.map((row) => {
+      const base = {
+        deployment_target: row.deployment_target,
+        regime_name: row.regime_name,
+        weather_state: row.weather_state,
+        updated_at: row.updated_at,
+      };
+
+      if (observerRole === 'viewer') {
+        return base;
+      }
+
+      return {
+        ...base,
+        vars: row.vars_json,
+      };
+    }),
+  };
+});
+
+// Get world state for a specific deployment target
+app.get('/ox/world/:target', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  const res = await pool.query(
+    `select deployment_target, regime_name, weather_state, vars_json, updated_at, source_event_id
+     from ox_world_state
+     where deployment_target = $1`,
+    [target],
+  );
+
+  if (res.rowCount === 0) {
+    reply.status(404);
+    return { error: 'world state not found for deployment target' };
+  }
+
+  await logObserverAccess(`/ox/world/${target}`, {}, 1, observerId, observerRole);
+
+  const row = res.rows[0];
+
+  // Apply observer role gating
+  const base = {
+    deployment_target: row.deployment_target,
+    regime_name: row.regime_name,
+    weather_state: row.weather_state,
+    updated_at: row.updated_at,
+  };
+
+  if (observerRole === 'viewer') {
+    return { world_state: base };
+  }
+
+  const analystView = {
+    ...base,
+    vars: row.vars_json,
+  };
+
+  if (observerRole === 'analyst') {
+    return { world_state: analystView };
+  }
+
+  // Auditor gets source_event_id
+  return {
+    world_state: {
+      ...analystView,
+      source_event_id: row.source_event_id,
+    },
+  };
+});
+
+// Get world state history for a deployment target
+app.get('/ox/world/:target/history', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  // History requires at least analyst role
+  if (observerRole === 'viewer') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select id, ts, regime_name, weather_state, vars_json, reason, source_event_id
+     from ox_world_state_history
+     where deployment_target = $1
+     order by ts desc
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/world/${target}/history`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    deployment_target: target,
+    history: res.rows.map((row) => {
+      const base = {
+        id: row.id,
+        ts: row.ts,
+        regime_name: row.regime_name,
+        weather_state: row.weather_state,
+        vars: row.vars_json,
+        reason: row.reason,
+      };
+
+      // Auditor gets source_event_id
+      if (observerRole === 'auditor') {
+        return { ...base, source_event_id: row.source_event_id };
+      }
+
+      return base;
+    }),
+  };
+});
+
+// Get rolling effects for a deployment target
+app.get('/ox/world/:target/effects', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { hours?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  // Effects require at least analyst role
+  if (observerRole === 'viewer') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const hours = Math.min(Math.max(Number(query.hours) || 6, 1), 168); // Max 1 week
+  const windowStart = new Date(Date.now() - hours * 60 * 60 * 1000);
+
+  const res = await pool.query(
+    `select bucket_start, accepted_count, rejected_count, sessions_created, artifacts_created,
+            cognition_provider_counts, avg_requested_cost, p95_latency_ms
+     from ox_world_effects_5m
+     where deployment_target = $1 and bucket_start >= $2
+     order by bucket_start desc`,
+    [target, windowStart],
+  );
+
+  await logObserverAccess(`/ox/world/${target}/effects`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  // Compute aggregates
+  let totalAccepted = 0;
+  let totalRejected = 0;
+  let totalSessions = 0;
+  let totalArtifacts = 0;
+
+  for (const row of res.rows) {
+    totalAccepted += Number(row.accepted_count ?? 0);
+    totalRejected += Number(row.rejected_count ?? 0);
+    totalSessions += Number(row.sessions_created ?? 0);
+    totalArtifacts += Number(row.artifacts_created ?? 0);
+  }
+
+  return {
+    deployment_target: target,
+    window_hours: hours,
+    aggregates: {
+      total_accepted: totalAccepted,
+      total_rejected: totalRejected,
+      total_sessions: totalSessions,
+      total_artifacts: totalArtifacts,
+      bucket_count: res.rowCount ?? 0,
+    },
+    buckets: res.rows.map((row) => ({
+      bucket_start: row.bucket_start,
+      accepted_count: Number(row.accepted_count),
+      rejected_count: Number(row.rejected_count),
+      sessions_created: Number(row.sessions_created),
+      artifacts_created: Number(row.artifacts_created),
+      cognition_provider_counts: row.cognition_provider_counts,
+      avg_requested_cost: row.avg_requested_cost ? Number(row.avg_requested_cost) : null,
+      p95_latency_ms: row.p95_latency_ms,
     })),
   };
 });

@@ -312,6 +312,60 @@ create table if not exists ox_deployment_drift (
 
 create index if not exists ox_deployment_drift_agent_idx on ox_deployment_drift (agent_id);
 create index if not exists ox_deployment_drift_window_idx on ox_deployment_drift (window_end desc);
+
+-- ============================================================================
+-- PHASE 6: World State & Causality Projection
+-- Makes physics legible by materializing world-state snapshots + effect aggregates.
+-- Explains "what changed and what it caused" as evidence.
+-- Read-only, replay-safe, no moral terms, no scores.
+-- ============================================================================
+
+-- Current world state per deployment (upserted on each physics tick)
+create table if not exists ox_world_state (
+  deployment_target text primary key,
+  regime_name text,
+  weather_state text not null default 'clear',
+  vars_json jsonb not null default '{}',
+  updated_at timestamptz not null default now(),
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_world_state_regime_idx on ox_world_state (regime_name);
+create index if not exists ox_world_state_weather_idx on ox_world_state (weather_state);
+
+-- World state history (append-only projection of physics ticks)
+create table if not exists ox_world_state_history (
+  id uuid primary key default gen_random_uuid(),
+  ts timestamptz not null,
+  deployment_target text not null,
+  regime_name text,
+  weather_state text not null,
+  vars_json jsonb not null,
+  reason text,
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_world_state_history_target_idx on ox_world_state_history (deployment_target, ts desc);
+create index if not exists ox_world_state_history_ts_idx on ox_world_state_history (ts desc);
+create index if not exists ox_world_state_history_weather_idx on ox_world_state_history (weather_state);
+
+-- Rolling effects aggregates (5-minute buckets per deployment)
+-- Tracks downstream effects of physics changes
+create table if not exists ox_world_effects_5m (
+  bucket_start timestamptz not null,
+  deployment_target text not null,
+  accepted_count int not null default 0,
+  rejected_count int not null default 0,
+  sessions_created int not null default 0,
+  artifacts_created int not null default 0,
+  cognition_provider_counts jsonb not null default '{}',
+  avg_requested_cost numeric,
+  p95_latency_ms int,
+  primary key (bucket_start, deployment_target)
+);
+
+create index if not exists ox_world_effects_5m_target_idx on ox_world_effects_5m (deployment_target, bucket_start desc);
+create index if not exists ox_world_effects_5m_bucket_idx on ox_world_effects_5m (bucket_start desc);
 `;
 
 async function run() {

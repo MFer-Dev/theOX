@@ -1,7 +1,7 @@
 # theOX Monorepo Makefile
 # Run `make help` for available targets
 
-.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants
+.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants seed-physics smoke-world
 
 # Default target
 help:
@@ -37,6 +37,9 @@ help:
 	@echo "  make sim-throughput          Run throughput burst simulation"
 	@echo "  make test-invariants         Run OX invariant tests"
 	@echo "  make test-physics-invariants Run OX Physics invariant tests"
+	@echo "  make test-world-invariants   Run OX World State invariant tests"
+	@echo "  make seed-physics            Seed physics with storm regime"
+	@echo "  make smoke-world             Smoke test world state endpoints"
 
 # ============================================================================
 # SETUP
@@ -168,3 +171,44 @@ test-invariants:
 test-physics-invariants:
 	@echo "Running OX Physics invariant tests..."
 	node --import tsx --test tests/invariants/ox_physics_invariants.test.ts
+
+test-world-invariants:
+	@echo "Running OX World State invariant tests..."
+	node --import tsx --test tests/invariants/ox_world_state_invariants.test.ts
+
+seed-physics:
+	@echo "Seeding physics with test regime..."
+	curl -s -X POST http://localhost:4019/deployments/ox-sandbox/apply-regime \
+		-H "Content-Type: application/json" \
+		-H "x-ops-role: test" \
+		-d '{"regime_name":"storm"}' | jq .
+	@echo "Triggering physics tick..."
+	curl -s -X POST http://localhost:4019/deployments/ox-sandbox/tick \
+		-H "x-ops-role: test" | jq .
+
+smoke-world:
+	@echo "Smoke testing world state endpoints..."
+	@echo "GET /ox/world (viewer):"
+	curl -s http://localhost:4018/ox/world \
+		-H "x-observer-id: smoke-test" \
+		-H "x-observer-role: viewer" | jq .
+	@echo ""
+	@echo "GET /ox/world (analyst):"
+	curl -s http://localhost:4018/ox/world \
+		-H "x-observer-id: smoke-test" \
+		-H "x-observer-role: analyst" | jq .
+	@echo ""
+	@echo "GET /ox/world/ox-sandbox (auditor):"
+	curl -s http://localhost:4018/ox/world/ox-sandbox \
+		-H "x-observer-id: smoke-test" \
+		-H "x-observer-role: auditor" | jq .
+	@echo ""
+	@echo "GET /ox/world/ox-sandbox/history (analyst):"
+	curl -s http://localhost:4018/ox/world/ox-sandbox/history \
+		-H "x-observer-id: smoke-test" \
+		-H "x-observer-role: analyst" | jq .
+	@echo ""
+	@echo "GET /ox/world/ox-sandbox/effects (analyst):"
+	curl -s http://localhost:4018/ox/world/ox-sandbox/effects \
+		-H "x-observer-id: smoke-test" \
+		-H "x-observer-role: analyst" | jq .
