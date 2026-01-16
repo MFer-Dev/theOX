@@ -9,6 +9,7 @@ import {
   dispatchOutbox,
 } from '@platform/shared';
 import { buildEvent, persistEvent, publishEvent } from '@platform/events';
+import { executeCognition, CognitionContext } from '@platform/cognition';
 
 const pool = getPool('agents');
 
@@ -439,9 +440,9 @@ app.post('/agents/:id/attempt', async (request, reply) => {
     return { error: 'requested_cost must be a non-negative number' };
   }
 
-  // Check agent exists and is active
+  // Check agent exists and is active, fetch cognition config
   const agentCheck = await pool.query(
-    'select status, deployment_target from agents where id = $1',
+    'select status, deployment_target, cognition_provider, throttle_profile from agents where id = $1',
     [id],
   );
   if (agentCheck.rowCount === 0) {
@@ -453,6 +454,8 @@ app.post('/agents/:id/attempt', async (request, reply) => {
     return { error: 'agent not active', status: agentCheck.rows[0].status };
   }
   const deploymentTarget = agentCheck.rows[0].deployment_target;
+  const cognitionProvider = agentCheck.rows[0].cognition_provider ?? 'none';
+  const throttleProfile = agentCheck.rows[0].throttle_profile ?? 'normal';
 
   // Check idempotency (action-level) - return same event_id on replay
   if (idempotencyKey) {
@@ -496,39 +499,121 @@ app.post('/agents/:id/attempt', async (request, reply) => {
   let accepted = false;
   let reason: string | null = null;
   let remainingBalance = newBalance;
+  let cognitionData: {
+    provider: string;
+    tokens_used: number;
+    estimated_cost: number;
+    actual_cost: number;
+    latency_ms: number;
+  } | null = null;
 
-  if (newBalance >= cost) {
-    accepted = true;
-    remainingBalance = newBalance - cost;
-    reason = null;
-  } else {
+  // Check if throttle is paused
+  if (throttleProfile === 'paused') {
     accepted = false;
-    reason = 'insufficient_capacity';
+    reason = 'throttle_paused';
+  } else {
+    // Build cognition context
+    const cognitionContext: CognitionContext = {
+      agent_id: id,
+      action_type: actionType,
+      deployment_target: deploymentTarget ?? 'unknown',
+      throttle_profile: throttleProfile as CognitionContext['throttle_profile'],
+    };
+
+    // Estimate total cost (base + cognition if applicable)
+    let estimatedCognitionCost = 0;
+    if (cognitionProvider !== 'none') {
+      try {
+        const { getProvider } = await import('@platform/cognition');
+        const provider = getProvider(cognitionProvider);
+        if (provider) {
+          estimatedCognitionCost = provider.estimateCost(body.payload, cognitionContext);
+        }
+      } catch {
+        // Provider not available, continue without cognition cost
+      }
+    }
+
+    const totalCost = cost + estimatedCognitionCost;
+
+    if (newBalance >= totalCost) {
+      accepted = true;
+
+      // Execute cognition if provider is configured
+      if (cognitionProvider !== 'none') {
+        try {
+          const cognitionResult = await executeCognition(
+            cognitionProvider,
+            body.payload,
+            cognitionContext,
+          );
+          if (cognitionResult) {
+            cognitionData = {
+              provider: cognitionProvider,
+              tokens_used: cognitionResult.result.tokens_used,
+              estimated_cost: cognitionResult.estimated_cost,
+              actual_cost: cognitionResult.actual_cost,
+              latency_ms: cognitionResult.result.latency_ms,
+            };
+            // Deduct actual cognition cost (may differ from estimate)
+            remainingBalance = newBalance - cost - cognitionResult.actual_cost;
+          } else {
+            remainingBalance = newBalance - cost;
+          }
+        } catch (err: unknown) {
+          const errMsg = err instanceof Error ? err.message : 'cognition_error';
+          if (errMsg === 'cognition_paused') {
+            accepted = false;
+            reason = 'cognition_paused';
+          } else {
+            // Cognition failed but action can proceed without it
+            request.log.warn({ err: errMsg }, 'cognition execution failed, proceeding without');
+            remainingBalance = newBalance - cost;
+          }
+        }
+      } else {
+        remainingBalance = newBalance - cost;
+      }
+
+      if (accepted) {
+        reason = null;
+      }
+    } else {
+      accepted = false;
+      reason = 'insufficient_capacity';
+    }
   }
 
   // Update capacity (only deduct if accepted)
   await pool.query(
     `update agent_capacity set balance = $2, last_reconciled_at = $3 where agent_id = $1`,
-    [id, remainingBalance, reconciledAt],
+    [id, accepted ? remainingBalance : newBalance, reconciledAt],
   );
 
   // Truncate payload for storage
   const truncatedPayload = truncatePayload(body.payload);
 
+  // Build event payload with cognition data if present
+  const eventPayload: Record<string, unknown> = {
+    agent_id: id,
+    deployment_target: deploymentTarget,
+    action_type: actionType,
+    requested_cost: cost,
+    accepted,
+    reason,
+    remaining_balance: accepted ? remainingBalance : newBalance,
+    payload: truncatedPayload ? JSON.parse(truncatedPayload) : null,
+  };
+
+  if (cognitionData) {
+    eventPayload.cognition = cognitionData;
+  }
+
   // Emit explicit outcome event: agent.action_accepted or agent.action_rejected
   const eventType = accepted ? 'agent.action_accepted' : 'agent.action_rejected';
   const evt = await appendEvent(
     eventType,
-    {
-      agent_id: id,
-      deployment_target: deploymentTarget,
-      action_type: actionType,
-      requested_cost: cost,
-      accepted,
-      reason,
-      remaining_balance: remainingBalance,
-      payload: truncatedPayload ? JSON.parse(truncatedPayload) : null,
-    },
+    eventPayload,
     id,
     correlationId,
     idempotencyKey,
@@ -541,12 +626,18 @@ app.post('/agents/:id/attempt', async (request, reply) => {
     [id, actionType, cost, accepted, reason, truncatedPayload, idempotencyKey ?? null, evt.event_id],
   );
 
-  return {
+  const response: Record<string, unknown> = {
     accepted,
     reason,
-    remaining_balance: remainingBalance,
+    remaining_balance: accepted ? remainingBalance : newBalance,
     event: evt,
   };
+
+  if (cognitionData) {
+    response.cognition = cognitionData;
+  }
+
+  return response;
 });
 
 // --- Admin/debug endpoints ---

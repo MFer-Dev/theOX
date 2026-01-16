@@ -217,6 +217,8 @@ importers:
         specifier: '14'
         version: 14.2.35(eslint@8.57.1)(typescript@5.9.3)
 
+  platform/cognition: {}
+
   platform/events:
     dependencies:
       '@platform/shared':
@@ -308,6 +310,9 @@ importers:
       '@fastify/swagger-ui':
         specifier: ^4.2.0
         version: 4.2.0
+      '@platform/cognition':
+        specifier: workspace:*
+        version: link:../../platform/cognition
       '@platform/events':
         specifier: workspace:*
         version: link:../../platform/events

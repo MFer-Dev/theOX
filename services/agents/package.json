@@ -16,6 +16,7 @@
   "dependencies": {
     "@fastify/swagger": "^8.14.0",
     "@fastify/swagger-ui": "^4.2.0",
+    "@platform/cognition": "workspace:*",
     "@platform/events": "workspace:*",
     "@platform/observability": "workspace:*",
     "@platform/shared": "workspace:*",

@@ -1,7 +1,7 @@
 import Fastify from 'fastify';
 import swagger from '@fastify/swagger';
 import swaggerUi from '@fastify/swagger-ui';
-import { ensureCorrelationId, getPool } from '@platform/shared';
+import { ensureCorrelationId, getPool, rateLimitMiddleware } from '@platform/shared';
 import { runConsumer, EventEnvelope } from '@platform/events';
 
 const pool = getPool('ox_read');
@@ -45,11 +45,37 @@ const ESCALATION_ACTION_TYPES = ['conflict', 'withdraw'];
 // Pattern window size
 const PATTERN_WINDOW_HOURS = 24;
 
+// Observation delay (Phase E1) - configurable per deployment
+const DEFAULT_OBSERVATION_DELAY_MS = 0;
+const DEPLOYMENT_DELAY_OVERRIDES: Record<string, number> = {
+  // Can be configured per deployment target
+  // 'production': 5000, // 5 second delay for production
+};
+
+// Rate limiting (Phase E2)
+const RATE_LIMIT_CONFIG = {
+  live: { key: 'ox_live', limit: 60, windowSec: 60 },
+  sessions: { key: 'ox_sessions', limit: 30, windowSec: 60 },
+  artifacts: { key: 'ox_artifacts', limit: 30, windowSec: 60 },
+};
+
+// Artifact types
+const ARTIFACT_TYPES = ['proposal', 'message', 'diagram', 'dataset'] as const;
+type ArtifactType = (typeof ARTIFACT_TYPES)[number];
+
 // --- Consumer state ---
 
 let consumerInitialized = false;
 
 // --- Event type definitions ---
+
+interface CognitionData {
+  provider: string;
+  tokens_used: number;
+  estimated_cost: number;
+  actual_cost: number;
+  latency_ms: number;
+}
 
 interface AgentEventPayload {
   agent_id: string;
@@ -64,8 +90,36 @@ interface AgentEventPayload {
   remaining_balance?: number;
   amount?: number;
   new_balance?: number;
+  cognition?: CognitionData;
+  payload?: Record<string, unknown>;
   [key: string]: unknown;
 }
+
+// --- Observer Audit Helper (Phase E3) ---
+
+const logObserverAccess = async (
+  endpoint: string,
+  queryParams: Record<string, unknown>,
+  responseCount: number,
+  observerId?: string,
+): Promise<void> => {
+  try {
+    await pool.query(
+      `insert into observer_access_log (observer_id, endpoint, query_params_json, response_count)
+       values ($1, $2, $3, $4)`,
+      [observerId ?? null, endpoint, JSON.stringify(queryParams), responseCount],
+    );
+  } catch (err) {
+    // Don't fail the request if audit logging fails
+    app.log.warn({ err }, 'Failed to log observer access');
+  }
+};
+
+// --- Observation Delay Helper (Phase E1) ---
+
+const getObservationDelay = (deploymentTarget: string): number => {
+  return DEPLOYMENT_DELAY_OVERRIDES[deploymentTarget] ?? DEFAULT_OBSERVATION_DELAY_MS;
+};
 
 // --- Summary builders ---
 
@@ -390,6 +444,155 @@ const updateAgentPatterns = async (
   );
 };
 
+// --- Artifact projection logic (Phase C) ---
+
+/**
+ * Derive artifact from action event if applicable.
+ * Artifacts are derived from specific action types with payload content.
+ */
+const deriveArtifact = async (
+  event: EventEnvelope<AgentEventPayload>,
+  sessionId: string | null,
+): Promise<void> => {
+  const payload = event.payload;
+
+  // Only derive artifacts from accepted actions
+  if (event.event_type !== 'agent.action_accepted') {
+    return;
+  }
+
+  // Determine artifact type based on action type and payload
+  let artifactType: ArtifactType | null = null;
+  let title: string | null = null;
+  let contentSummary: string | null = null;
+
+  const actionType = payload.action_type;
+  const actionPayload = payload.payload;
+
+  switch (actionType) {
+    case 'communicate':
+      artifactType = 'message';
+      title = 'Communication';
+      contentSummary = actionPayload?.message
+        ? String(actionPayload.message).slice(0, 200)
+        : 'Agent communication';
+      break;
+    case 'create':
+      // Check payload for hints about what was created
+      if (actionPayload?.type === 'proposal') {
+        artifactType = 'proposal';
+        title = actionPayload?.title ? String(actionPayload.title) : 'Proposal';
+        contentSummary = actionPayload?.summary ? String(actionPayload.summary).slice(0, 200) : null;
+      } else if (actionPayload?.type === 'diagram') {
+        artifactType = 'diagram';
+        title = actionPayload?.title ? String(actionPayload.title) : 'Diagram';
+        contentSummary = 'Visual artifact (metadata only)';
+      } else if (actionPayload?.type === 'dataset') {
+        artifactType = 'dataset';
+        title = actionPayload?.title ? String(actionPayload.title) : 'Dataset';
+        contentSummary = 'Data artifact (metadata only)';
+      }
+      break;
+    case 'exchange':
+      artifactType = 'message';
+      title = 'Exchange';
+      contentSummary = 'Exchange between agents';
+      break;
+  }
+
+  if (!artifactType) {
+    return;
+  }
+
+  // Build metadata
+  const metadata: Record<string, unknown> = {
+    action_type: actionType,
+    cost: payload.requested_cost,
+  };
+
+  if (payload.cognition) {
+    metadata.cognition = {
+      provider: payload.cognition.provider,
+      tokens_used: payload.cognition.tokens_used,
+    };
+  }
+
+  // Insert artifact (idempotent)
+  await pool.query(
+    `insert into ox_artifacts (artifact_type, source_session_id, source_event_id, agent_id, deployment_target, title, content_summary, metadata_json)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)
+     on conflict (source_event_id, artifact_type) do nothing`,
+    [
+      artifactType,
+      sessionId,
+      event.event_id,
+      payload.agent_id,
+      payload.deployment_target ?? 'unknown',
+      title,
+      contentSummary,
+      JSON.stringify(metadata),
+    ],
+  );
+};
+
+// --- Capacity timeline projection logic (Phase D) ---
+
+/**
+ * Project capacity changes to timeline for economic visibility.
+ */
+const projectCapacityChange = async (
+  event: EventEnvelope<AgentEventPayload>,
+): Promise<void> => {
+  const payload = event.payload;
+
+  // Only track action events that affect capacity
+  if (!event.event_type.startsWith('agent.action_')) {
+    return;
+  }
+
+  // Build cost breakdown
+  const costBreakdown: Record<string, unknown> = {
+    base_cost: payload.requested_cost ?? 0,
+    action_type: payload.action_type,
+    accepted: payload.accepted,
+  };
+
+  if (payload.cognition) {
+    costBreakdown.cognition = {
+      provider: payload.cognition.provider,
+      estimated_cost: payload.cognition.estimated_cost,
+      actual_cost: payload.cognition.actual_cost,
+      tokens_used: payload.cognition.tokens_used,
+      latency_ms: payload.cognition.latency_ms,
+    };
+    costBreakdown.total_cost =
+      (payload.requested_cost ?? 0) + payload.cognition.actual_cost;
+  } else {
+    costBreakdown.total_cost = payload.requested_cost ?? 0;
+  }
+
+  // Calculate balance before (from remaining_balance + cost if accepted)
+  const remainingBalance = payload.remaining_balance ?? 0;
+  const totalCost = payload.accepted ? (costBreakdown.total_cost as number) : 0;
+  const balanceBefore = remainingBalance + totalCost;
+
+  // Insert timeline entry (idempotent)
+  await pool.query(
+    `insert into ox_capacity_timeline (agent_id, ts, event_type, balance_before, balance_after, cost_breakdown_json, source_event_id)
+     values ($1, $2, $3, $4, $5, $6, $7)
+     on conflict (source_event_id) do nothing`,
+    [
+      payload.agent_id,
+      event.occurred_at,
+      event.event_type,
+      balanceBefore,
+      remainingBalance,
+      JSON.stringify(costBreakdown),
+      event.event_id,
+    ],
+  );
+};
+
 // --- Event handler (idempotent) ---
 
 const handleEvent = async (event: EventEnvelope<AgentEventPayload>): Promise<void> => {
@@ -423,9 +626,16 @@ const handleEvent = async (event: EventEnvelope<AgentEventPayload>): Promise<voi
     throw err;
   }
 
-  // 2. Session derivation (for action events)
+  // 2. Apply observation delay (Phase E1)
+  const delay = getObservationDelay(deploymentTarget);
+  if (delay > 0) {
+    await new Promise((r) => setTimeout(r, delay));
+  }
+
+  // 3. Session derivation (for action events)
+  let sessionId: string | null = null;
   try {
-    const sessionId = await findOrCreateSession(
+    sessionId = await findOrCreateSession(
       agentId,
       deploymentTarget,
       eventTs,
@@ -459,12 +669,26 @@ const handleEvent = async (event: EventEnvelope<AgentEventPayload>): Promise<voi
     app.log.warn({ err, event_id: event.event_id }, 'Session derivation warning');
   }
 
-  // 3. Pattern update (background, non-blocking)
+  // 4. Pattern update (background, non-blocking)
   try {
     await updateAgentPatterns(agentId, eventTs, event.event_type, actionType);
   } catch (err) {
     // Log but don't fail event processing for pattern errors
     app.log.warn({ err, event_id: event.event_id }, 'Pattern update warning');
+  }
+
+  // 5. Artifact derivation (Phase C)
+  try {
+    await deriveArtifact(event, sessionId);
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Artifact derivation warning');
+  }
+
+  // 6. Capacity timeline projection (Phase D)
+  try {
+    await projectCapacityChange(event);
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Capacity timeline projection warning');
   }
 };
 
@@ -511,8 +735,11 @@ interface LiveQueryParams {
   limit?: string;
 }
 
-app.get('/ox/live', async (request) => {
+app.get('/ox/live', {
+  preHandler: rateLimitMiddleware(RATE_LIMIT_CONFIG.live),
+}, async (request) => {
   const query = request.query as LiveQueryParams;
+  const observerId = request.headers['x-observer-id'] as string | undefined;
   const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
 
   const res = await pool.query(
@@ -522,6 +749,9 @@ app.get('/ox/live', async (request) => {
      limit $1`,
     [limit],
   );
+
+  // Log observer access (Phase E3)
+  await logObserverAccess('/ox/live', query as Record<string, unknown>, res.rowCount ?? 0, observerId);
 
   return {
     events: res.rows.map((row) => ({
@@ -543,8 +773,11 @@ interface SessionsQueryParams {
   limit?: string;
 }
 
-app.get('/ox/sessions', async (request) => {
+app.get('/ox/sessions', {
+  preHandler: rateLimitMiddleware(RATE_LIMIT_CONFIG.sessions),
+}, async (request) => {
   const query = request.query as SessionsQueryParams;
+  const observerId = request.headers['x-observer-id'] as string | undefined;
   const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
 
   const res = await pool.query(
@@ -555,6 +788,9 @@ app.get('/ox/sessions', async (request) => {
      limit $1`,
     [limit],
   );
+
+  // Log observer access
+  await logObserverAccess('/ox/sessions', query as Record<string, unknown>, res.rowCount ?? 0, observerId);
 
   return {
     sessions: res.rows.map((row) => ({
@@ -572,6 +808,7 @@ app.get('/ox/sessions', async (request) => {
 
 app.get('/ox/sessions/:id', async (request, reply) => {
   const { id } = request.params as { id: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
 
   const sessionRes = await pool.query(
     `select session_id, start_ts, end_ts, participating_agent_ids, deployment_target,
@@ -595,6 +832,9 @@ app.get('/ox/sessions/:id', async (request, reply) => {
      order by ts asc`,
     [id],
   );
+
+  // Log observer access
+  await logObserverAccess(`/ox/sessions/${id}`, {}, eventsRes.rowCount ?? 0, observerId);
 
   return {
     session: {
@@ -647,6 +887,304 @@ app.get('/ox/agents/:id/patterns', async (request, reply) => {
       event_count: row.event_count,
       created_at: row.created_at,
     })),
+  };
+});
+
+// --- Read-only API: Artifacts (Phase C) ---
+
+interface ArtifactsQueryParams {
+  session_id?: string;
+  agent_id?: string;
+  artifact_type?: string;
+  limit?: string;
+}
+
+app.get('/ox/artifacts', {
+  preHandler: rateLimitMiddleware(RATE_LIMIT_CONFIG.artifacts),
+}, async (request) => {
+  const query = request.query as ArtifactsQueryParams;
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  let sql = `
+    select id, artifact_type, source_session_id, source_event_id, agent_id, deployment_target,
+           title, content_summary, metadata_json as metadata, created_at
+    from ox_artifacts
+    where 1=1
+  `;
+  const params: unknown[] = [];
+  let paramIndex = 1;
+
+  if (query.session_id) {
+    sql += ` and source_session_id = $${paramIndex++}`;
+    params.push(query.session_id);
+  }
+  if (query.agent_id) {
+    sql += ` and agent_id = $${paramIndex++}`;
+    params.push(query.agent_id);
+  }
+  if (query.artifact_type) {
+    sql += ` and artifact_type = $${paramIndex++}`;
+    params.push(query.artifact_type);
+  }
+
+  sql += ` order by created_at desc limit $${paramIndex}`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  // Log observer access (Phase E3)
+  await logObserverAccess('/ox/artifacts', query as Record<string, unknown>, res.rowCount ?? 0, observerId);
+
+  return {
+    artifacts: res.rows.map((row) => ({
+      id: row.id,
+      artifact_type: row.artifact_type,
+      source_session_id: row.source_session_id,
+      source_event_id: row.source_event_id,
+      agent_id: row.agent_id,
+      deployment_target: row.deployment_target,
+      title: row.title,
+      content_summary: row.content_summary,
+      metadata: row.metadata,
+      created_at: row.created_at,
+    })),
+  };
+});
+
+app.get('/ox/artifacts/:id', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+
+  const res = await pool.query(
+    `select id, artifact_type, source_session_id, source_event_id, agent_id, deployment_target,
+            title, content_summary, metadata_json as metadata, created_at
+     from ox_artifacts
+     where id = $1`,
+    [id],
+  );
+
+  // Log observer access
+  await logObserverAccess(`/ox/artifacts/${id}`, {}, res.rowCount ?? 0, observerId);
+
+  if (res.rowCount === 0) {
+    reply.status(404);
+    return { error: 'artifact not found' };
+  }
+
+  const row = res.rows[0];
+  return {
+    artifact: {
+      id: row.id,
+      artifact_type: row.artifact_type,
+      source_session_id: row.source_session_id,
+      source_event_id: row.source_event_id,
+      agent_id: row.agent_id,
+      deployment_target: row.deployment_target,
+      title: row.title,
+      content_summary: row.content_summary,
+      metadata: row.metadata,
+      created_at: row.created_at,
+    },
+  };
+});
+
+// --- Read-only API: Economics (Phase D) ---
+
+app.get('/ox/agents/:id/economics', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = request.query as { hours?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const hours = Math.min(Math.max(Number(query.hours) || 24, 1), 168); // Max 1 week
+
+  const windowStart = new Date(Date.now() - hours * 60 * 60 * 1000);
+
+  // Get capacity timeline
+  const timelineRes = await pool.query(
+    `select ts, event_type, balance_before, balance_after, cost_breakdown_json as cost_breakdown
+     from ox_capacity_timeline
+     where agent_id = $1 and ts >= $2
+     order by ts desc
+     limit 500`,
+    [id, windowStart],
+  );
+
+  if (timelineRes.rowCount === 0) {
+    reply.status(404);
+    return { error: 'no economic data found for agent' };
+  }
+
+  // Calculate aggregate statistics
+  let totalCost = 0;
+  let totalCognitionCost = 0;
+  let actionsAccepted = 0;
+  let actionsRejected = 0;
+  const cognitionByProvider: Record<string, { count: number; tokens: number; cost: number }> = {};
+
+  for (const row of timelineRes.rows) {
+    const breakdown = row.cost_breakdown;
+    if (breakdown.accepted) {
+      actionsAccepted++;
+      totalCost += breakdown.total_cost ?? 0;
+      if (breakdown.cognition) {
+        totalCognitionCost += breakdown.cognition.actual_cost ?? 0;
+        const provider = breakdown.cognition.provider;
+        if (!cognitionByProvider[provider]) {
+          cognitionByProvider[provider] = { count: 0, tokens: 0, cost: 0 };
+        }
+        cognitionByProvider[provider].count++;
+        cognitionByProvider[provider].tokens += breakdown.cognition.tokens_used ?? 0;
+        cognitionByProvider[provider].cost += breakdown.cognition.actual_cost ?? 0;
+      }
+    } else {
+      actionsRejected++;
+    }
+  }
+
+  // Calculate burn rate (cost per hour)
+  const oldestEvent = timelineRes.rows[timelineRes.rows.length - 1];
+  const newestEvent = timelineRes.rows[0];
+  const timeSpanHours =
+    (new Date(newestEvent.ts).getTime() - new Date(oldestEvent.ts).getTime()) / (1000 * 60 * 60);
+  const burnRate = timeSpanHours > 0 ? totalCost / timeSpanHours : 0;
+
+  // Log observer access
+  await logObserverAccess(`/ox/agents/${id}/economics`, { hours }, timelineRes.rowCount ?? 0, observerId);
+
+  return {
+    agent_id: id,
+    window_hours: hours,
+    summary: {
+      total_cost: totalCost,
+      total_cognition_cost: totalCognitionCost,
+      base_cost: totalCost - totalCognitionCost,
+      actions_accepted: actionsAccepted,
+      actions_rejected: actionsRejected,
+      burn_rate_per_hour: Math.round(burnRate * 100) / 100,
+      cognition_by_provider: cognitionByProvider,
+    },
+    timeline: timelineRes.rows.map((row) => ({
+      ts: row.ts,
+      event_type: row.event_type,
+      balance_before: row.balance_before,
+      balance_after: row.balance_after,
+      cost_breakdown: row.cost_breakdown,
+    })),
+  };
+});
+
+// --- Read-only API: System Self-Inspection (Phase F) ---
+
+app.get('/ox/system/throughput', async (request) => {
+  const query = request.query as { hours?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const hours = Math.min(Math.max(Number(query.hours) || 1, 1), 24);
+  const windowStart = new Date(Date.now() - hours * 60 * 60 * 1000);
+
+  const res = await pool.query(
+    `select
+       count(*) as total_events,
+       count(distinct agent_id) as unique_agents,
+       count(*) filter (where type = 'agent.action_accepted') as accepted,
+       count(*) filter (where type = 'agent.action_rejected') as rejected,
+       min(ts) as earliest,
+       max(ts) as latest
+     from ox_live_events
+     where ts >= $1`,
+    [windowStart],
+  );
+
+  const row = res.rows[0];
+  const timeSpanMs = row.latest && row.earliest
+    ? new Date(row.latest).getTime() - new Date(row.earliest).getTime()
+    : 0;
+  const eventsPerMinute = timeSpanMs > 0
+    ? (Number(row.total_events) / (timeSpanMs / 60000))
+    : 0;
+
+  await logObserverAccess('/ox/system/throughput', { hours }, 1, observerId);
+
+  return {
+    window_hours: hours,
+    total_events: Number(row.total_events),
+    unique_agents: Number(row.unique_agents),
+    events_per_minute: Math.round(eventsPerMinute * 100) / 100,
+    accepted_actions: Number(row.accepted),
+    rejected_actions: Number(row.rejected),
+    earliest_event: row.earliest,
+    latest_event: row.latest,
+  };
+});
+
+app.get('/ox/system/event-lag', async (request) => {
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+
+  // Get the most recent events and their materialization times
+  const res = await pool.query(
+    `select
+       source_event_id,
+       ts as event_ts,
+       -- Estimate lag from consumer offsets or event processing
+       extract(epoch from (now() - ts)) as seconds_since_event
+     from ox_live_events
+     order by ts desc
+     limit 10`,
+  );
+
+  // Get consumer offset info
+  const offsetRes = await pool.query(
+    `select topic, partition_id, offset_value, updated_at
+     from consumer_offsets
+     where consumer_group = 'ox-read-materializer'`,
+  );
+
+  await logObserverAccess('/ox/system/event-lag', {}, res.rowCount ?? 0, observerId);
+
+  return {
+    recent_events: res.rows.map((row) => ({
+      event_id: row.source_event_id,
+      event_ts: row.event_ts,
+      seconds_since: Math.round(Number(row.seconds_since_event)),
+    })),
+    consumer_offsets: offsetRes.rows.map((row) => ({
+      topic: row.topic,
+      partition_id: row.partition_id,
+      offset: Number(row.offset_value),
+      updated_at: row.updated_at,
+    })),
+    consumer_status: consumerInitialized ? 'running' : 'not_started',
+  };
+});
+
+app.get('/ox/system/projection-health', async (request) => {
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+
+  // Get counts from all projection tables
+  const [liveRes, sessionsRes, patternsRes, artifactsRes, timelineRes, accessRes] = await Promise.all([
+    pool.query('select count(*) as count from ox_live_events'),
+    pool.query('select count(*) as count, count(*) filter (where is_active) as active from ox_sessions'),
+    pool.query('select count(*) as count from ox_agent_patterns'),
+    pool.query('select count(*) as count from ox_artifacts'),
+    pool.query('select count(*) as count from ox_capacity_timeline'),
+    pool.query('select count(*) as count from observer_access_log where accessed_at > now() - interval \'1 hour\''),
+  ]);
+
+  await logObserverAccess('/ox/system/projection-health', {}, 1, observerId);
+
+  return {
+    projections: {
+      ox_live_events: Number(liveRes.rows[0].count),
+      ox_sessions: {
+        total: Number(sessionsRes.rows[0].count),
+        active: Number(sessionsRes.rows[0].active),
+      },
+      ox_agent_patterns: Number(patternsRes.rows[0].count),
+      ox_artifacts: Number(artifactsRes.rows[0].count),
+      ox_capacity_timeline: Number(timelineRes.rows[0].count),
+    },
+    observer_access_last_hour: Number(accessRes.rows[0].count),
+    consumer_initialized: consumerInitialized,
+    health: consumerInitialized ? 'healthy' : 'degraded',
   };
 });
 

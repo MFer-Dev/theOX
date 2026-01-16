@@ -92,6 +92,82 @@ create table if not exists ox_agent_patterns (
 create index if not exists ox_agent_patterns_agent_idx on ox_agent_patterns (agent_id);
 create index if not exists ox_agent_patterns_type_idx on ox_agent_patterns (pattern_type);
 create index if not exists ox_agent_patterns_window_idx on ox_agent_patterns (window_end desc);
+
+-- ============================================================================
+-- PHASE C: Artifacts (Observable Evidence)
+-- Artifacts are derived from sessions or actions. Immutable, observable.
+-- ============================================================================
+
+create table if not exists ox_artifacts (
+  id uuid primary key default gen_random_uuid(),
+  artifact_type text not null,
+  source_session_id uuid references ox_sessions(session_id),
+  source_event_id uuid,
+  agent_id uuid not null,
+  deployment_target text not null,
+  title text,
+  content_summary text,
+  metadata_json jsonb not null default '{}',
+  created_at timestamptz not null default now(),
+  unique (source_event_id, artifact_type)
+);
+
+create index if not exists ox_artifacts_session_idx on ox_artifacts (source_session_id) where source_session_id is not null;
+create index if not exists ox_artifacts_agent_idx on ox_artifacts (agent_id);
+create index if not exists ox_artifacts_type_idx on ox_artifacts (artifact_type);
+create index if not exists ox_artifacts_created_idx on ox_artifacts (created_at desc);
+
+-- ============================================================================
+-- PHASE D: Economic Pressure Surfaces
+-- Capacity burn rate, throttle delays, cognition costs over time.
+-- ============================================================================
+
+create table if not exists ox_capacity_timeline (
+  id uuid primary key default gen_random_uuid(),
+  agent_id uuid not null,
+  ts timestamptz not null,
+  event_type text not null,
+  balance_before int not null,
+  balance_after int not null,
+  cost_breakdown_json jsonb not null default '{}',
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_capacity_timeline_agent_idx on ox_capacity_timeline (agent_id, ts desc);
+create index if not exists ox_capacity_timeline_ts_idx on ox_capacity_timeline (ts desc);
+
+-- ============================================================================
+-- PHASE E3: Observer Access Audit
+-- All observer access leaves footprints.
+-- ============================================================================
+
+create table if not exists observer_access_log (
+  id uuid primary key default gen_random_uuid(),
+  observer_id text,
+  endpoint text not null,
+  query_params_json jsonb,
+  response_count int,
+  accessed_at timestamptz not null default now()
+);
+
+create index if not exists observer_access_log_observer_idx on observer_access_log (observer_id) where observer_id is not null;
+create index if not exists observer_access_log_endpoint_idx on observer_access_log (endpoint);
+create index if not exists observer_access_log_accessed_idx on observer_access_log (accessed_at desc);
+
+-- ============================================================================
+-- PHASE F: System Health Projections
+-- Meta-observations for studying the system as a system.
+-- ============================================================================
+
+create table if not exists ox_system_snapshots (
+  id uuid primary key default gen_random_uuid(),
+  snapshot_type text not null,
+  ts timestamptz not null default now(),
+  metrics_json jsonb not null,
+  unique (snapshot_type, ts)
+);
+
+create index if not exists ox_system_snapshots_type_idx on ox_system_snapshots (snapshot_type, ts desc);
 `;
 
 async function run() {
