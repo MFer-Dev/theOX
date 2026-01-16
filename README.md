@@ -1,112 +1,136 @@
-# GenMe Monorepo
+# theOX Monorepo
 
-GenMe is a **React Native social app** with a modular **Fastify + Postgres** backend, a **Next.js Ops/Admin console**, and an **event-driven “ops agents”** scaffold for automation (human-in-the-loop).
+A pnpm workspaces + Turbo monorepo containing:
+- **Mobile app** (React Native + Tamagui)
+- **Ops console** (Next.js admin UI)
+- **Backend services** (17 Fastify microservices)
+- **Platform libraries** (shared code)
+- **Infrastructure** (Terraform + Docker)
 
-This repository is organized for fast iteration in one place (apps + services + platform libs + infra + docs). We can split repos later once boundaries harden.
+## Quick Start
 
-## Structure
-- `apps/`
-  - `mobile/` — React Native + Tamagui app
-  - `ops-console/` — Next.js admin/ops console UI
-- `services/` — Fastify APIs (each with `/docs`, `/healthz`, `/readyz`)
-  - Core: `gateway`, `identity`, `discourse`, `purge`, `cred`, `endorse`, `notes`, `trustgraph`, `safety`, `insights`, `notifications`, `search`, `lists`, `messaging`, `ai`
-  - Ops: `ops-gateway` (admin API), `ops-agents` (agent task orchestrator)
-- `workers/` — background consumers (Kafka/Redpanda) and batch jobs
-- `platform/` — shared libs: `shared`, `events`, `security`, `observability`
-- `infra/` — Terraform modules + environments (scaffolds)
-- `docs/` — product specs, runbooks, QA, transparency artifacts
-
-## What’s built right now (high-level)
-### Mobile app (`apps/mobile`)
-- Premium UI primitives + theming (light/dark + Gathering mode)
-- Onboarding + legal acceptance flow
-- Core screens (home/search/inbox/profile/thread/lists/settings/compose)
-- Credibility surfacing (SCS badge) + generation ring + explainers
-- Gathering dev tools + header lockup + countdown
-
-### Core backend services (`services/*`)
-- Identity/auth + sessions + policy acceptance + account deletion
-- Discourse posts/replies + media pipeline scaffold + finalize hook
-- Safety service with reports/flags/friction/restrictions/appeals + burst heuristics
-- Notifications service with device registration + worker scaffold
-- Search, lists, messaging, trustgraph, insights scaffolds
-
-### Ops/Admin plane (new)
-- `apps/ops-console`: real UI wired to backend services
-- `services/ops-gateway` (port `4013`):
-  - RBAC enforcement (dev header-based for now)
-  - append-only ops audit log
-  - user search + user “360” view (identity + sessions + safety + recent discourse)
-  - moderation queue from safety `reports` + actions (v0)
-  - observability health page (v0)
-- `services/ops-agents` (port `4014`):
-  - agent task DB + approvals
-  - **event-driven ingestion** (consumes `events.*.v1` when enabled)
-  - executes approved actions via **ops-gateway tool endpoints** (approval-gated)
-
-## Local prerequisites
-- Node 20+
-- `pnpm` (workspace)
-- Docker (for Postgres + Redpanda + Redis)
-
-## Quickstart (backend)
 ```bash
-pnpm install
-pnpm core:up              # starts docker deps (if needed) + core services
+# Prerequisites: Node 20+, pnpm, Docker
 
-# one-time: run per-service migrations you care about (identity, discourse, safety, etc.)
-pnpm --filter @services/identity migrate
-pnpm --filter @services/discourse migrate
-pnpm --filter @services/safety migrate
-pnpm --filter @services/ops-gateway migrate
-pnpm --filter @services/ops-agents migrate
+# 1. Install dependencies
+make install
+
+# 2. Start infrastructure (Postgres, Redis, Redpanda)
+make up
+
+# 3. Run migrations
+make migrate
+
+# 4. Start all backend services
+make dev
+
+# 5. In another terminal, start ops console
+make dev:ops
 ```
 
-## Quickstart (ops console)
-```bash
-pnpm --filter @apps/ops-console dev
+See [docs/LOCAL_DEV.md](docs/LOCAL_DEV.md) for detailed setup.
+
+## Project Structure
+
+```
+theOX/
+├── apps/
+│   ├── mobile/           # React Native + Tamagui app
+│   └── ops-console/      # Next.js admin/ops console
+├── services/             # Fastify microservices
+│   ├── gateway/          # API gateway (port 4000)
+│   ├── identity/         # Auth/users (port 4001)
+│   ├── discourse/        # Posts/replies (port 4002)
+│   ├── safety/           # Moderation (port 4008)
+│   ├── ops-gateway/      # Admin API (port 4013)
+│   ├── ops-agents/       # Agent orchestrator (port 4014)
+│   └── ...               # And 11 more services
+├── workers/              # Background workers (Kafka consumers)
+├── platform/             # Shared libraries
+│   ├── shared/           # Auth, DB, rate limiting
+│   ├── events/           # Event system, Kafka
+│   ├── observability/    # Logging, tracing
+│   └── security/         # Security utilities
+├── infra/                # Terraform + Docker
+├── docs/                 # Documentation
+└── scripts/              # Dev/ops scripts
 ```
 
-Ops console expects:
-- `NEXT_PUBLIC_OPS_API_BASE_URL` (defaults to `http://localhost:4013`)
-- `NEXT_PUBLIC_OPS_AGENTS_URL` (defaults to `http://localhost:4014`)
+## Available Commands
 
-Dev auth is currently header/localStorage based (SSO/cookies comes next).
+### Using Make (recommended)
 
-## Quickstart (mobile)
-See `apps/mobile/README.md`.
+| Command | Description |
+|---------|-------------|
+| `make install` | Install all dependencies |
+| `make up` | Start local infrastructure |
+| `make down` | Stop local infrastructure |
+| `make dev` | Start all backend services |
+| `make dev:ops` | Start ops console (port 3000) |
+| `make dev:mobile` | Start mobile Metro bundler |
+| `make lint` | Run ESLint |
+| `make typecheck` | Run TypeScript checks |
+| `make format` | Format code with Prettier |
+| `make test` | Run all tests |
+| `make smoke` | Run smoke tests |
+| `make migrate` | Run all migrations |
+| `make clean` | Remove build artifacts |
 
-## Ports (local defaults)
-- `4000` gateway
-- `4001` identity
-- `4002` discourse
-- `4003` purge
-- `4004` cred
-- `4005` endorse
-- `4006` notes
-- `4007` trustgraph
-- `4008` safety
-- `4009` notifications
-- `4010` search
-- `4011` messaging
-- `4012` lists
-- `4013` ops-gateway
-- `4014` ops-agents
-- `4015` insights
-- `4016` ai
+### Using pnpm directly
 
-## Docs (what to read first)
-- Backoffice/ops system specs: `docs/product/ops/README.md`
-- Event backbone: `docs/product/event-taxonomy.md`
-- Semantic/IP boundary: `docs/product/semantic-layer.md`
-- Media pipeline contract: `docs/product/media-pipeline.md`
-- Runbooks: `docs/runbooks/*`
+```bash
+pnpm install              # Install dependencies
+pnpm dev:up               # Start Docker infrastructure
+pnpm core:up              # Start all services
+pnpm lint                 # Lint
+pnpm typecheck            # Type check
+pnpm build                # Build all packages
+pnpm smoke                # Run smoke tests
+pnpm healthcheck          # Check service health
+```
 
-## GitHub Desktop
-If you’re trying to connect GitHub Desktop and this folder isn’t recognized as a repo yet, see:
-- `docs/runbooks/github-desktop.md`
+## Service Ports
 
-## Contributing / Security
-- See `CONTRIBUTING.md`
-- No secrets in git — use local env files; see `SECURITY.md`
+| Port | Service | Description |
+|------|---------|-------------|
+| 4000 | gateway | API gateway |
+| 4001 | identity | Auth & users |
+| 4002 | discourse | Posts & replies |
+| 4003 | purge | Gathering mechanics |
+| 4004 | cred | Credibility scoring |
+| 4005 | endorse | Endorsements |
+| 4006 | notes | Notes service |
+| 4007 | trustgraph | Trust relationships |
+| 4008 | safety | Moderation & reports |
+| 4009 | notifications | Push notifications |
+| 4010 | search | Search |
+| 4011 | messaging | Direct messages |
+| 4012 | lists | User lists |
+| 4013 | ops-gateway | Admin API |
+| 4014 | ops-agents | Agent orchestrator |
+| 4015 | insights | Analytics |
+| 4016 | ai | AI service |
 
+## Documentation
+
+- [Local Development](docs/LOCAL_DEV.md) - Setup and troubleshooting
+- [Architecture](docs/ARCHITECTURE.md) - System overview
+- [Contributing](CONTRIBUTING.md) - How to contribute
+- [Security](SECURITY.md) - Security policy
+
+## Tech Stack
+
+- **Runtime**: Node.js 20+
+- **Package Manager**: pnpm 9.12+
+- **Build**: Turbo
+- **Backend**: Fastify, TypeScript
+- **Database**: PostgreSQL 16
+- **Cache**: Redis 7
+- **Queue**: Redpanda (Kafka-compatible)
+- **Mobile**: React Native 0.74, Tamagui
+- **Web**: Next.js 14, Tailwind CSS
+- **Infra**: Terraform, Docker, AWS
+
+## License
+
+See [LICENSE](LICENSE)

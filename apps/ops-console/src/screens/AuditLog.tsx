@@ -7,7 +7,7 @@ export function AuditLog() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const load = async (next?: string | null) => {
+  const load = async (_next?: string | null) => {
     setLoading(true);
     setError(null);
     try {

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { opsClient } from '../api/opsClient';
 
-type Props = {
+type _Props = {
   onSuccess: () => void;
 };
 

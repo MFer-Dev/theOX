@@ -26,10 +26,12 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Build
-        run: pnpm -s build
+      - name: Lint
+        run: pnpm lint
 
-      # Optional: enable once you want Docker-based integration tests in CI.
-      # - name: Smoke
-      #   run: pnpm -s smoke
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
 

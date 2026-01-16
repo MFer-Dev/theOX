@@ -273,7 +273,7 @@ app.get('/notes/by-content/:id', async (request) => {
   const noteIds = notes.rows.map((r) => r.id);
   let citations: any[] = [];
   let versions: any[] = [];
-  let eligibility: Record<string, boolean> = {};
+  const eligibility: Record<string, boolean> = {};
   if (noteIds.length > 0) {
     const c = await pool.query('select * from note_citations where note_id = any($1)', [noteIds]);
     const v = await pool.query(

@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc -b",
+    "typecheck": "tsc --noEmit",
     "migrate": "tsx src/migrate.ts",
     "lint": "eslint 'src/**/*.{ts,tsx}'"
   },

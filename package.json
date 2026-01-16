@@ -1,22 +1,27 @@
 {
-  "name": "genme",
+  "name": "theox",
   "private": true,
   "version": "0.0.1",
   "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
     "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md}\" --ignore-path .gitignore",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,json,md}\" --ignore-path .gitignore",
     "test": "turbo run test",
     "dev:up": "docker compose up -d",
     "dev:down": "docker compose down",
     "smoke": "pnpm exec tsx scripts/smoke/run.ts",
+    "healthcheck": "pnpm exec tsx scripts/healthcheck.ts",
     "core:up": "bash scripts/dev/core-stack.sh up",
     "core:down": "bash scripts/dev/core-stack.sh down",
-    "materializer:migrate": "pnpm --filter @workers/materializer migrate",
-    "materializer:dev": "pnpm --filter @workers/materializer dev",
-    "integrity:migrate": "pnpm --filter @workers/integrity migrate",
-    "integrity:dev": "pnpm --filter @workers/integrity dev"
+    "migrate": "bash -c 'for svc in identity discourse safety cred endorse notes purge notifications ops-gateway ops-agents; do pnpm --filter @services/$svc migrate 2>/dev/null || true; done'",
+    "clean": "rm -rf node_modules apps/*/node_modules services/*/node_modules platform/*/node_modules workers/*/node_modules .turbo"
   },
   "devDependencies": {
     "@types/node": "^20.16.5",

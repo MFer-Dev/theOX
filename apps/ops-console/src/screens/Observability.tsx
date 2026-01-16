@@ -42,7 +42,7 @@ export function Observability() {
     setSuccess(null);
     try {
       const svc = String(it?.service ?? 'unknown');
-      const route = String(it?.route ?? 'unknown');
+      const _route = String(it?.route ?? 'unknown');
       const status = it?.status ? ` ${it.status}` : '';
       const msg = String(it?.message ?? 'error').slice(0, 140);
       await opsClient.agentCreateTask({

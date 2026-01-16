@@ -14,12 +14,14 @@ module.exports = {
   parserOptions: {
     sourceType: "module",
     ecmaVersion: "latest",
-    project: "./tsconfig.base.json"
+    project: true,
+    tsconfigRootDir: __dirname
   },
   ignorePatterns: ["dist", "build", "node_modules", "*.js"],
   rules: {
     "@typescript-eslint/explicit-module-boundary-types": "off",
-    "@typescript-eslint/no-explicit-any": "warn"
+    "@typescript-eslint/no-explicit-any": "warn",
+    "@typescript-eslint/no-unused-vars": ["error", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }]
   }
 };
 

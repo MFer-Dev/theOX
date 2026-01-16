@@ -1,0 +1,33 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  "references": [
+    { "path": "platform/shared" },
+    { "path": "platform/events" },
+    { "path": "platform/observability" },
+    { "path": "platform/security" },
+    { "path": "services/gateway" },
+    { "path": "services/identity" },
+    { "path": "services/discourse" },
+    { "path": "services/purge" },
+    { "path": "services/cred" },
+    { "path": "services/endorse" },
+    { "path": "services/notes" },
+    { "path": "services/trustgraph" },
+    { "path": "services/safety" },
+    { "path": "services/notifications" },
+    { "path": "services/search" },
+    { "path": "services/messaging" },
+    { "path": "services/lists" },
+    { "path": "services/ops-gateway" },
+    { "path": "services/ops-agents" },
+    { "path": "services/insights" },
+    { "path": "services/ai" },
+    { "path": "workers/integrity" },
+    { "path": "workers/materializer" }
+  ],
+  "include": [],
+  "exclude": ["node_modules", "apps"]
+}

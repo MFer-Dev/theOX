@@ -1,7 +1,7 @@
 {
-  "extends": ["../../.eslintrc.cjs"],
-  "parserOptions": {
-    "project": "./tsconfig.json"
+  "extends": ["next/core-web-vitals"],
+  "rules": {
+    "@typescript-eslint/no-explicit-any": "off"
   }
 }
 

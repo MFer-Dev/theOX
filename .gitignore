@@ -9,6 +9,8 @@ build
 coverage
 .env
 .env.*
+!.env.example
+!.env.smoke.example
 .pnpm-store
 ios/Pods
 android/app/build

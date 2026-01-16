@@ -1,19 +1,17 @@
-version: "3.9"
-
 services:
   postgres:
     image: postgres:16-alpine
     container_name: postgres
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-genme_local}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-genme_local_password}
-      POSTGRES_DB: ${POSTGRES_DB:-genme_local}
+      POSTGRES_USER: ${POSTGRES_USER:-theox_local}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-theox_local_password}
+      POSTGRES_DB: ${POSTGRES_DB:-theox_local}
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-genme_local}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-theox_local}"]
       interval: 10s
       timeout: 5s
       retries: 5
