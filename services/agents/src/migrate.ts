@@ -152,6 +152,40 @@ create table if not exists sponsor_actions (
 
 create index if not exists idx_sponsor_actions_sponsor on sponsor_actions (sponsor_id, created_at desc);
 create index if not exists idx_sponsor_actions_agent on sponsor_actions (agent_id, created_at desc);
+
+-- ============================================================================
+-- AXIS 2: Environmental Scarcity & Pressure
+-- Runtime environment constraints that affect agent action acceptance.
+-- This is physics, not moderation.
+-- ============================================================================
+
+-- Cognition availability enum
+do $$ begin
+  create type cognition_availability as enum ('full', 'degraded', 'unavailable');
+exception when duplicate_object then null;
+end $$;
+
+-- Environment states for runtime enforcement
+create table if not exists environment_states (
+  deployment_target text primary key,
+  cognition_availability cognition_availability not null default 'full',
+  max_throughput_per_minute int,
+  throttle_factor float not null default 1.0,
+  active_window_start timestamptz,
+  active_window_end timestamptz,
+  imposed_at timestamptz not null default now(),
+  reason text
+);
+
+-- Throughput tracking for rate limiting per deployment
+create table if not exists deployment_throughput (
+  deployment_target text not null,
+  window_start timestamptz not null,
+  action_count int not null default 0,
+  primary key (deployment_target, window_start)
+);
+
+create index if not exists idx_deployment_throughput_target on deployment_throughput (deployment_target, window_start desc);
 `;
 
 async function run() {

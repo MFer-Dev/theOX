@@ -168,6 +168,150 @@ create table if not exists ox_system_snapshots (
 );
 
 create index if not exists ox_system_snapshots_type_idx on ox_system_snapshots (snapshot_type, ts desc);
+
+-- ============================================================================
+-- AXIS 1: Inter-Agent Perception (Non-Communicative)
+-- Agents produce observable evidence about other agents without direct messaging.
+-- This is perception, not communication.
+-- ============================================================================
+
+-- Add subject_agent_id to artifacts for inter-agent perception
+do $$ begin
+  alter table ox_artifacts add column if not exists subject_agent_id uuid;
+exception when others then null;
+end $$;
+
+create index if not exists ox_artifacts_subject_idx on ox_artifacts (subject_agent_id) where subject_agent_id is not null;
+
+-- Artifact implication log: tracks when artifacts implicate other agents
+create table if not exists ox_artifact_implications (
+  id uuid primary key default gen_random_uuid(),
+  artifact_id uuid not null references ox_artifacts(id),
+  issuing_agent_id uuid not null,
+  subject_agent_id uuid not null,
+  implication_type text not null,
+  source_event_id uuid not null unique,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists ox_artifact_implications_issuer_idx on ox_artifact_implications (issuing_agent_id);
+create index if not exists ox_artifact_implications_subject_idx on ox_artifact_implications (subject_agent_id);
+create index if not exists ox_artifact_implications_type_idx on ox_artifact_implications (implication_type);
+
+-- ============================================================================
+-- AXIS 2: Environmental Scarcity & Pressure
+-- The system imposes non-moral, non-punitive constraints on agents.
+-- This is physics, not moderation.
+-- ============================================================================
+
+-- Current environment state (single row per deployment target)
+create table if not exists ox_environment_states (
+  deployment_target text primary key,
+  cognition_availability text not null default 'full',
+  max_throughput_per_minute int,
+  throttle_factor float not null default 1.0,
+  active_window_start timestamptz,
+  active_window_end timestamptz,
+  imposed_at timestamptz not null default now(),
+  reason text
+);
+
+-- Environment state history (append-only projection)
+create table if not exists ox_environment_history (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  previous_state_json jsonb,
+  new_state_json jsonb not null,
+  change_type text not null,
+  source_event_id uuid unique,
+  changed_at timestamptz not null default now()
+);
+
+create index if not exists ox_environment_history_target_idx on ox_environment_history (deployment_target, changed_at desc);
+create index if not exists ox_environment_history_type_idx on ox_environment_history (change_type);
+
+-- Environment-rejected actions correlation
+create table if not exists ox_environment_rejections (
+  id uuid primary key default gen_random_uuid(),
+  agent_id uuid not null,
+  deployment_target text not null,
+  rejection_reason text not null,
+  environment_state_json jsonb not null,
+  source_event_id uuid not null unique,
+  rejected_at timestamptz not null default now()
+);
+
+create index if not exists ox_environment_rejections_agent_idx on ox_environment_rejections (agent_id);
+create index if not exists ox_environment_rejections_target_idx on ox_environment_rejections (deployment_target);
+
+-- ============================================================================
+-- AXIS 3: Observer Stratification & Partial Observability
+-- Not all observers see the same thing, but none influence anything.
+-- ============================================================================
+
+-- Observer role enum
+do $$ begin
+  create type observer_role as enum ('viewer', 'analyst', 'auditor');
+exception when duplicate_object then null;
+end $$;
+
+-- Add observer_role to access log
+do $$ begin
+  alter table observer_access_log add column if not exists observer_role observer_role default 'viewer';
+exception when others then null;
+end $$;
+
+-- Observer registry (optional self-identification)
+create table if not exists ox_observers (
+  observer_id text primary key,
+  observer_role observer_role not null default 'viewer',
+  registered_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  access_count int not null default 0,
+  metadata_json jsonb not null default '{}'
+);
+
+create index if not exists ox_observers_role_idx on ox_observers (observer_role);
+create index if not exists ox_observers_last_seen_idx on ox_observers (last_seen_at desc);
+
+-- ============================================================================
+-- AXIS 4: Cross-Deployment Identity Drift
+-- An agent deployed in multiple environments expresses differently without learning.
+-- ============================================================================
+
+-- Deployment-specific patterns (distinct from global patterns)
+create table if not exists ox_agent_deployment_patterns (
+  id uuid primary key default gen_random_uuid(),
+  agent_id uuid not null,
+  deployment_target text not null,
+  pattern_type text not null,
+  window_start timestamptz not null,
+  window_end timestamptz not null,
+  observation_json jsonb not null,
+  event_count int not null default 0,
+  created_at timestamptz not null default now(),
+  unique (agent_id, deployment_target, pattern_type, window_start)
+);
+
+create index if not exists ox_agent_deployment_patterns_agent_idx on ox_agent_deployment_patterns (agent_id);
+create index if not exists ox_agent_deployment_patterns_target_idx on ox_agent_deployment_patterns (deployment_target);
+create index if not exists ox_agent_deployment_patterns_window_idx on ox_agent_deployment_patterns (window_end desc);
+
+-- Cross-deployment drift observations (deltas between deployments)
+create table if not exists ox_deployment_drift (
+  id uuid primary key default gen_random_uuid(),
+  agent_id uuid not null,
+  deployment_a text not null,
+  deployment_b text not null,
+  pattern_type text not null,
+  window_end timestamptz not null,
+  drift_summary_json jsonb not null,
+  created_at timestamptz not null default now(),
+  unique (agent_id, deployment_a, deployment_b, pattern_type, window_end)
+);
+
+create index if not exists ox_deployment_drift_agent_idx on ox_deployment_drift (agent_id);
+create index if not exists ox_deployment_drift_window_idx on ox_deployment_drift (window_end desc);
 `;
 
 async function run() {

@@ -45,8 +45,117 @@ app.register(swaggerUi, {
 
 const MAX_PAYLOAD_BYTES = 16 * 1024; // 16 KB hard cap for event payloads
 
-const ACTION_TYPES = ['communicate', 'associate', 'create', 'exchange', 'conflict', 'withdraw'] as const;
+// Extended action types including inter-agent perception (Axis 1)
+const ACTION_TYPES = [
+  'communicate',
+  'associate',
+  'create',
+  'exchange',
+  'conflict',
+  'withdraw',
+  // Inter-agent perception types (non-communicative)
+  'critique',
+  'counter_model',
+  'refusal',
+  'rederivation',
+] as const;
 type ActionType = (typeof ACTION_TYPES)[number];
+
+// Artifact types that implicate other agents
+const IMPLICATING_ARTIFACT_TYPES = ['critique', 'counter_model', 'refusal', 'rederivation'] as const;
+
+// Environment state types
+interface EnvironmentState {
+  deployment_target: string;
+  cognition_availability: 'full' | 'degraded' | 'unavailable';
+  max_throughput_per_minute: number | null;
+  throttle_factor: number;
+  active_window_start: Date | null;
+  active_window_end: Date | null;
+  imposed_at: Date;
+  reason: string | null;
+}
+
+// --- Environment constraint helpers (Axis 2) ---
+
+/**
+ * Check environment constraints for a deployment target.
+ * Returns rejection reason if action should be blocked, null otherwise.
+ */
+const checkEnvironmentConstraints = async (
+  deploymentTarget: string,
+): Promise<{ allowed: boolean; reason: string | null; state: EnvironmentState | null }> => {
+  // Get current environment state
+  const stateRes = await pool.query(
+    `select * from environment_states where deployment_target = $1`,
+    [deploymentTarget],
+  );
+
+  if (stateRes.rowCount === 0) {
+    // No constraints defined for this deployment
+    return { allowed: true, reason: null, state: null };
+  }
+
+  const state = stateRes.rows[0] as EnvironmentState;
+
+  // Check active window
+  const now = new Date();
+  if (state.active_window_start && state.active_window_end) {
+    if (now < state.active_window_start || now > state.active_window_end) {
+      return {
+        allowed: false,
+        reason: 'environment_outside_active_window',
+        state,
+      };
+    }
+  }
+
+  // Check cognition availability
+  if (state.cognition_availability === 'unavailable') {
+    return {
+      allowed: false,
+      reason: 'environment_cognition_unavailable',
+      state,
+    };
+  }
+
+  // Check throughput limits
+  if (state.max_throughput_per_minute) {
+    const windowStart = new Date(Math.floor(now.getTime() / 60000) * 60000);
+    const throughputRes = await pool.query(
+      `select action_count from deployment_throughput
+       where deployment_target = $1 and window_start = $2`,
+      [deploymentTarget, windowStart],
+    );
+
+    const currentCount = throughputRes.rows[0]?.action_count ?? 0;
+    if (currentCount >= state.max_throughput_per_minute) {
+      return {
+        allowed: false,
+        reason: 'environment_throughput_exceeded',
+        state,
+      };
+    }
+  }
+
+  return { allowed: true, reason: null, state };
+};
+
+/**
+ * Increment throughput counter for a deployment target.
+ */
+const incrementThroughput = async (deploymentTarget: string): Promise<void> => {
+  const now = new Date();
+  const windowStart = new Date(Math.floor(now.getTime() / 60000) * 60000);
+
+  await pool.query(
+    `insert into deployment_throughput (deployment_target, window_start, action_count)
+     values ($1, $2, 1)
+     on conflict (deployment_target, window_start)
+     do update set action_count = deployment_throughput.action_count + 1`,
+    [deploymentTarget, windowStart],
+  );
+};
 
 // --- Payload helpers ---
 
@@ -415,6 +524,8 @@ interface AttemptBody {
   requested_cost: number;
   payload?: Record<string, unknown>;
   idempotency_key?: string;
+  // Axis 1: Inter-agent perception - optional subject agent reference
+  subject_agent_id?: string;
 }
 
 app.post('/agents/:id/attempt', async (request, reply) => {
@@ -440,6 +551,19 @@ app.post('/agents/:id/attempt', async (request, reply) => {
     return { error: 'requested_cost must be a non-negative number' };
   }
 
+  // Axis 1: Validate subject_agent_id for implicating action types
+  const subjectAgentId = body.subject_agent_id ?? null;
+  const isImplicatingAction = IMPLICATING_ARTIFACT_TYPES.includes(actionType as typeof IMPLICATING_ARTIFACT_TYPES[number]);
+
+  if (isImplicatingAction && !subjectAgentId) {
+    reply.status(400);
+    return {
+      error: 'subject_agent_id required for implicating action types',
+      action_type: actionType,
+      implicating_types: IMPLICATING_ARTIFACT_TYPES,
+    };
+  }
+
   // Check agent exists and is active, fetch cognition config
   const agentCheck = await pool.query(
     'select status, deployment_target, cognition_provider, throttle_profile from agents where id = $1',
@@ -456,6 +580,33 @@ app.post('/agents/:id/attempt', async (request, reply) => {
   const deploymentTarget = agentCheck.rows[0].deployment_target;
   const cognitionProvider = agentCheck.rows[0].cognition_provider ?? 'none';
   const throttleProfile = agentCheck.rows[0].throttle_profile ?? 'normal';
+
+  // Axis 2: Check environment constraints
+  const envCheck = await checkEnvironmentConstraints(deploymentTarget ?? 'default');
+  if (!envCheck.allowed) {
+    // Emit environment rejection event
+    const envEvt = await appendEvent(
+      'agent.action_rejected.environment',
+      {
+        agent_id: id,
+        deployment_target: deploymentTarget,
+        action_type: actionType,
+        requested_cost: cost,
+        rejection_reason: envCheck.reason,
+        environment_state: envCheck.state,
+      },
+      id,
+      correlationId,
+    );
+
+    return {
+      accepted: false,
+      reason: envCheck.reason,
+      environment_constraint: true,
+      environment_state: envCheck.state,
+      event: envEvt,
+    };
+  }
 
   // Check idempotency (action-level) - return same event_id on replay
   if (idempotencyKey) {
@@ -593,7 +744,7 @@ app.post('/agents/:id/attempt', async (request, reply) => {
   // Truncate payload for storage
   const truncatedPayload = truncatePayload(body.payload);
 
-  // Build event payload with cognition data if present
+  // Build event payload with cognition data and subject_agent_id if present
   const eventPayload: Record<string, unknown> = {
     agent_id: id,
     deployment_target: deploymentTarget,
@@ -604,6 +755,11 @@ app.post('/agents/:id/attempt', async (request, reply) => {
     remaining_balance: accepted ? remainingBalance : newBalance,
     payload: truncatedPayload ? JSON.parse(truncatedPayload) : null,
   };
+
+  // Axis 1: Include subject_agent_id for inter-agent perception
+  if (subjectAgentId) {
+    eventPayload.subject_agent_id = subjectAgentId;
+  }
 
   if (cognitionData) {
     eventPayload.cognition = cognitionData;
@@ -619,6 +775,42 @@ app.post('/agents/:id/attempt', async (request, reply) => {
     idempotencyKey,
   );
 
+  // Axis 1: Emit artifact events for accepted implicating actions
+  if (accepted && isImplicatingAction && subjectAgentId) {
+    // Emit ox.artifact.issued
+    await appendEvent(
+      'ox.artifact.issued',
+      {
+        issuing_agent_id: id,
+        artifact_type: actionType,
+        deployment_target: deploymentTarget,
+        source_event_id: evt.event_id,
+      },
+      id,
+      correlationId,
+    );
+
+    // Emit ox.artifact.implicates_agent
+    await appendEvent(
+      'ox.artifact.implicates_agent',
+      {
+        issuing_agent_id: id,
+        subject_agent_id: subjectAgentId,
+        artifact_type: actionType,
+        implication_type: actionType,
+        deployment_target: deploymentTarget,
+        source_event_id: evt.event_id,
+      },
+      id,
+      correlationId,
+    );
+  }
+
+  // Axis 2: Increment throughput counter for accepted actions
+  if (accepted && deploymentTarget) {
+    await incrementThroughput(deploymentTarget);
+  }
+
   // Log the action with event_id for idempotent replay
   await pool.query(
     `insert into agent_action_log (agent_id, action_type, cost, accepted, reason, payload, idempotency_key, event_id)
@@ -632,6 +824,11 @@ app.post('/agents/:id/attempt', async (request, reply) => {
     remaining_balance: accepted ? remainingBalance : newBalance,
     event: evt,
   };
+
+  // Include subject_agent_id in response
+  if (subjectAgentId) {
+    response.subject_agent_id = subjectAgentId;
+  }
 
   if (cognitionData) {
     response.cognition = cognitionData;
@@ -1043,6 +1240,243 @@ app.get('/admin/sponsors/:sponsorId/actions', async (request, reply) => {
     [sponsorId, limit],
   );
   return { actions: res.rows };
+});
+
+// --- Axis 2: Environment State Management (Admin) ---
+// Environment constraints are physics, not moderation.
+// These endpoints allow ops to impose scarcity conditions.
+
+interface EnvironmentStateBody {
+  deployment_target: string;
+  cognition_availability?: 'full' | 'degraded' | 'unavailable';
+  max_throughput_per_minute?: number | null;
+  throttle_factor?: number;
+  active_window_start?: string | null;
+  active_window_end?: string | null;
+  reason?: string;
+}
+
+app.get('/admin/environment', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+
+  const res = await pool.query(
+    `select deployment_target, cognition_availability, max_throughput_per_minute,
+            throttle_factor, active_window_start, active_window_end, imposed_at, reason
+     from environment_states
+     order by deployment_target`,
+  );
+
+  return { environment_states: res.rows };
+});
+
+app.get('/admin/environment/:target', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+  const { target } = request.params as { target: string };
+
+  const res = await pool.query(
+    `select deployment_target, cognition_availability, max_throughput_per_minute,
+            throttle_factor, active_window_start, active_window_end, imposed_at, reason
+     from environment_states
+     where deployment_target = $1`,
+    [target],
+  );
+
+  if (res.rowCount === 0) {
+    reply.status(404);
+    return { error: 'environment state not found' };
+  }
+
+  // Get recent throughput data
+  const throughputRes = await pool.query(
+    `select window_start, action_count
+     from deployment_throughput
+     where deployment_target = $1
+     order by window_start desc
+     limit 60`,
+    [target],
+  );
+
+  return {
+    environment_state: res.rows[0],
+    recent_throughput: throughputRes.rows,
+  };
+});
+
+app.put('/admin/environment/:target', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+  const { target } = request.params as { target: string };
+  const body = request.body as EnvironmentStateBody;
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Validate cognition_availability
+  const validAvailability = ['full', 'degraded', 'unavailable'] as const;
+  const cogAvailability = body.cognition_availability ?? 'full';
+  if (!validAvailability.includes(cogAvailability)) {
+    reply.status(400);
+    return { error: 'invalid cognition_availability', valid: validAvailability };
+  }
+
+  // Validate throttle_factor
+  const throttleFactor = body.throttle_factor ?? 1.0;
+  if (throttleFactor < 0 || throttleFactor > 10) {
+    reply.status(400);
+    return { error: 'throttle_factor must be between 0 and 10' };
+  }
+
+  // Parse active window timestamps
+  const activeStart = body.active_window_start ? new Date(body.active_window_start) : null;
+  const activeEnd = body.active_window_end ? new Date(body.active_window_end) : null;
+
+  // Get previous state for event
+  const prevRes = await pool.query(
+    `select * from environment_states where deployment_target = $1`,
+    [target],
+  );
+  const previousState = prevRes.rows[0] ?? null;
+
+  // Upsert environment state
+  await pool.query(
+    `insert into environment_states (
+       deployment_target, cognition_availability, max_throughput_per_minute,
+       throttle_factor, active_window_start, active_window_end, imposed_at, reason
+     ) values ($1, $2::cognition_availability, $3, $4, $5, $6, now(), $7)
+     on conflict (deployment_target)
+     do update set
+       cognition_availability = $2::cognition_availability,
+       max_throughput_per_minute = $3,
+       throttle_factor = $4,
+       active_window_start = $5,
+       active_window_end = $6,
+       imposed_at = now(),
+       reason = $7`,
+    [
+      target,
+      cogAvailability,
+      body.max_throughput_per_minute ?? null,
+      throttleFactor,
+      activeStart,
+      activeEnd,
+      body.reason ?? null,
+    ],
+  );
+
+  // Emit environment state changed event
+  const evt = await appendEvent(
+    'environment.state_changed',
+    {
+      deployment_target: target,
+      previous_state: previousState,
+      new_state: {
+        cognition_availability: cogAvailability,
+        max_throughput_per_minute: body.max_throughput_per_minute ?? null,
+        throttle_factor: throttleFactor,
+        active_window_start: activeStart?.toISOString() ?? null,
+        active_window_end: activeEnd?.toISOString() ?? null,
+        reason: body.reason ?? null,
+      },
+    },
+    'system',
+    correlationId,
+  );
+
+  return {
+    ok: true,
+    deployment_target: target,
+    environment_state: {
+      cognition_availability: cogAvailability,
+      max_throughput_per_minute: body.max_throughput_per_minute ?? null,
+      throttle_factor: throttleFactor,
+      active_window_start: activeStart?.toISOString() ?? null,
+      active_window_end: activeEnd?.toISOString() ?? null,
+    },
+    event: evt,
+  };
+});
+
+app.delete('/admin/environment/:target', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+  const { target } = request.params as { target: string };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Get current state for event
+  const prevRes = await pool.query(
+    `select * from environment_states where deployment_target = $1`,
+    [target],
+  );
+
+  if (prevRes.rowCount === 0) {
+    reply.status(404);
+    return { error: 'environment state not found' };
+  }
+
+  // Delete environment state (removes all constraints)
+  await pool.query(
+    `delete from environment_states where deployment_target = $1`,
+    [target],
+  );
+
+  // Emit environment state removed event
+  const evt = await appendEvent(
+    'environment.state_removed',
+    {
+      deployment_target: target,
+      previous_state: prevRes.rows[0],
+    },
+    'system',
+    correlationId,
+  );
+
+  return {
+    ok: true,
+    deployment_target: target,
+    event: evt,
+  };
+});
+
+// Get throughput statistics for a deployment
+app.get('/admin/environment/:target/throughput', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+  const { target } = request.params as { target: string };
+  const query = request.query as { minutes?: string };
+  const minutes = Math.min(Number(query.minutes) || 60, 1440); // Max 24 hours
+
+  const windowStart = new Date(Date.now() - minutes * 60 * 1000);
+
+  const res = await pool.query(
+    `select window_start, action_count
+     from deployment_throughput
+     where deployment_target = $1 and window_start >= $2
+     order by window_start desc`,
+    [target, windowStart],
+  );
+
+  const totalActions = res.rows.reduce((sum, row) => sum + row.action_count, 0);
+  const avgPerMinute = res.rowCount && res.rowCount > 0
+    ? totalActions / res.rowCount
+    : 0;
+
+  return {
+    deployment_target: target,
+    window_minutes: minutes,
+    total_actions: totalActions,
+    avg_actions_per_minute: Math.round(avgPerMinute * 100) / 100,
+    data_points: res.rows,
+  };
 });
 
 // --- Outbox dispatcher ---

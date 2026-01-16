@@ -59,9 +59,20 @@ const RATE_LIMIT_CONFIG = {
   artifacts: { key: 'ox_artifacts', limit: 30, windowSec: 60 },
 };
 
-// Artifact types
-const ARTIFACT_TYPES = ['proposal', 'message', 'diagram', 'dataset'] as const;
+// Artifact types (extended for Axis 1: Inter-agent perception)
+const ARTIFACT_TYPES = [
+  'proposal', 'message', 'diagram', 'dataset',
+  // Inter-agent perception artifacts (non-communicative)
+  'critique', 'counter_model', 'refusal', 'rederivation',
+] as const;
 type ArtifactType = (typeof ARTIFACT_TYPES)[number];
+
+// Inter-agent perception artifact types
+const PERCEPTION_ARTIFACT_TYPES = ['critique', 'counter_model', 'refusal', 'rederivation'] as const;
+
+// Observer roles (Axis 3)
+const OBSERVER_ROLES = ['viewer', 'analyst', 'auditor'] as const;
+type ObserverRole = (typeof OBSERVER_ROLES)[number];
 
 // --- Consumer state ---
 
@@ -92,27 +103,105 @@ interface AgentEventPayload {
   new_balance?: number;
   cognition?: CognitionData;
   payload?: Record<string, unknown>;
+  // Axis 1: Inter-agent perception
+  subject_agent_id?: string;
+  issuing_agent_id?: string;
+  artifact_type?: string;
+  implication_type?: string;
+  source_event_id?: string;
+  // Axis 2: Environment events
+  previous_state?: Record<string, unknown>;
+  new_state?: Record<string, unknown>;
+  rejection_reason?: string;
+  environment_state?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
-// --- Observer Audit Helper (Phase E3) ---
+// --- Observer Helpers (Axis 3) ---
 
+/**
+ * Get observer role from header or registry.
+ * Returns 'viewer' by default (most restricted).
+ */
+const getObserverRole = async (observerId?: string, headerRole?: string): Promise<ObserverRole> => {
+  // If role specified in header and valid, use it
+  if (headerRole && OBSERVER_ROLES.includes(headerRole as ObserverRole)) {
+    return headerRole as ObserverRole;
+  }
+
+  // If observer is registered, get their role
+  if (observerId) {
+    try {
+      const res = await pool.query(
+        `select observer_role from ox_observers where observer_id = $1`,
+        [observerId],
+      );
+      if (res.rowCount && res.rowCount > 0) {
+        return res.rows[0].observer_role as ObserverRole;
+      }
+    } catch {
+      // Fall through to default
+    }
+  }
+
+  return 'viewer';
+};
+
+/**
+ * Log observer access with role (Axis 3).
+ */
 const logObserverAccess = async (
   endpoint: string,
   queryParams: Record<string, unknown>,
   responseCount: number,
   observerId?: string,
+  observerRole?: ObserverRole,
 ): Promise<void> => {
   try {
     await pool.query(
-      `insert into observer_access_log (observer_id, endpoint, query_params_json, response_count)
-       values ($1, $2, $3, $4)`,
-      [observerId ?? null, endpoint, JSON.stringify(queryParams), responseCount],
+      `insert into observer_access_log (observer_id, endpoint, query_params_json, response_count, observer_role)
+       values ($1, $2, $3, $4, $5::observer_role)`,
+      [observerId ?? null, endpoint, JSON.stringify(queryParams), responseCount, observerRole ?? 'viewer'],
     );
+
+    // Update observer last_seen if registered
+    if (observerId) {
+      await pool.query(
+        `update ox_observers
+         set last_seen_at = now(), access_count = access_count + 1
+         where observer_id = $1`,
+        [observerId],
+      );
+    }
   } catch (err) {
     // Don't fail the request if audit logging fails
     app.log.warn({ err }, 'Failed to log observer access');
   }
+};
+
+/**
+ * Check if observer role can access the endpoint.
+ * Viewer: Basic live data only
+ * Analyst: + Patterns, economics, artifacts
+ * Auditor: + Full system health, all projections
+ */
+const canAccessEndpoint = (role: ObserverRole, endpoint: string): boolean => {
+  // Viewer can access: /ox/live, /ox/sessions, basic artifact list
+  const viewerEndpoints = ['/ox/live', '/ox/sessions'];
+
+  // Auditor-only endpoints: /ox/system/*, /ox/environment/*, /ox/observers/*, /ox/drift/*
+  const auditorEndpoints = ['/ox/system', '/ox/environment', '/ox/observers', '/ox/drift'];
+
+  if (role === 'auditor') return true;
+
+  if (role === 'analyst') {
+    // Analyst can access everything except auditor-only endpoints
+    const isAuditorOnly = auditorEndpoints.some(e => endpoint.startsWith(e));
+    return !isAuditorOnly;
+  }
+
+  // Viewer - most restricted
+  return viewerEndpoints.some(e => endpoint.startsWith(e));
 };
 
 // --- Observation Delay Helper (Phase E1) ---
@@ -444,11 +533,12 @@ const updateAgentPatterns = async (
   );
 };
 
-// --- Artifact projection logic (Phase C) ---
+// --- Artifact projection logic (Phase C + Axis 1) ---
 
 /**
  * Derive artifact from action event if applicable.
  * Artifacts are derived from specific action types with payload content.
+ * Extended for Axis 1: Inter-agent perception artifacts.
  */
 const deriveArtifact = async (
   event: EventEnvelope<AgentEventPayload>,
@@ -465,39 +555,74 @@ const deriveArtifact = async (
   let artifactType: ArtifactType | null = null;
   let title: string | null = null;
   let contentSummary: string | null = null;
+  let subjectAgentId: string | null = null;
 
   const actionType = payload.action_type;
   const actionPayload = payload.payload;
 
-  switch (actionType) {
-    case 'communicate':
-      artifactType = 'message';
-      title = 'Communication';
-      contentSummary = actionPayload?.message
-        ? String(actionPayload.message).slice(0, 200)
-        : 'Agent communication';
-      break;
-    case 'create':
-      // Check payload for hints about what was created
-      if (actionPayload?.type === 'proposal') {
-        artifactType = 'proposal';
-        title = actionPayload?.title ? String(actionPayload.title) : 'Proposal';
-        contentSummary = actionPayload?.summary ? String(actionPayload.summary).slice(0, 200) : null;
-      } else if (actionPayload?.type === 'diagram') {
-        artifactType = 'diagram';
-        title = actionPayload?.title ? String(actionPayload.title) : 'Diagram';
-        contentSummary = 'Visual artifact (metadata only)';
-      } else if (actionPayload?.type === 'dataset') {
-        artifactType = 'dataset';
-        title = actionPayload?.title ? String(actionPayload.title) : 'Dataset';
-        contentSummary = 'Data artifact (metadata only)';
-      }
-      break;
-    case 'exchange':
-      artifactType = 'message';
-      title = 'Exchange';
-      contentSummary = 'Exchange between agents';
-      break;
+  // Axis 1: Inter-agent perception artifacts
+  if (PERCEPTION_ARTIFACT_TYPES.includes(actionType as typeof PERCEPTION_ARTIFACT_TYPES[number])) {
+    artifactType = actionType as ArtifactType;
+    subjectAgentId = payload.subject_agent_id ?? null;
+
+    switch (actionType) {
+      case 'critique':
+        title = 'Critique';
+        contentSummary = actionPayload?.summary
+          ? String(actionPayload.summary).slice(0, 200)
+          : 'Agent critique of another agent\'s behavior';
+        break;
+      case 'counter_model':
+        title = 'Counter-Model';
+        contentSummary = actionPayload?.summary
+          ? String(actionPayload.summary).slice(0, 200)
+          : 'Alternative behavioral model proposed';
+        break;
+      case 'refusal':
+        title = 'Refusal';
+        contentSummary = actionPayload?.reason
+          ? String(actionPayload.reason).slice(0, 200)
+          : 'Agent refused interaction with another agent';
+        break;
+      case 'rederivation':
+        title = 'Rederivation';
+        contentSummary = actionPayload?.summary
+          ? String(actionPayload.summary).slice(0, 200)
+          : 'Agent rederived conclusions from another agent\'s work';
+        break;
+    }
+  } else {
+    // Original artifact derivation logic
+    switch (actionType) {
+      case 'communicate':
+        artifactType = 'message';
+        title = 'Communication';
+        contentSummary = actionPayload?.message
+          ? String(actionPayload.message).slice(0, 200)
+          : 'Agent communication';
+        break;
+      case 'create':
+        // Check payload for hints about what was created
+        if (actionPayload?.type === 'proposal') {
+          artifactType = 'proposal';
+          title = actionPayload?.title ? String(actionPayload.title) : 'Proposal';
+          contentSummary = actionPayload?.summary ? String(actionPayload.summary).slice(0, 200) : null;
+        } else if (actionPayload?.type === 'diagram') {
+          artifactType = 'diagram';
+          title = actionPayload?.title ? String(actionPayload.title) : 'Diagram';
+          contentSummary = 'Visual artifact (metadata only)';
+        } else if (actionPayload?.type === 'dataset') {
+          artifactType = 'dataset';
+          title = actionPayload?.title ? String(actionPayload.title) : 'Dataset';
+          contentSummary = 'Data artifact (metadata only)';
+        }
+        break;
+      case 'exchange':
+        artifactType = 'message';
+        title = 'Exchange';
+        contentSummary = 'Exchange between agents';
+        break;
+    }
   }
 
   if (!artifactType) {
@@ -517,10 +642,10 @@ const deriveArtifact = async (
     };
   }
 
-  // Insert artifact (idempotent)
+  // Insert artifact (idempotent) with subject_agent_id for inter-agent perception
   await pool.query(
-    `insert into ox_artifacts (artifact_type, source_session_id, source_event_id, agent_id, deployment_target, title, content_summary, metadata_json)
-     values ($1, $2, $3, $4, $5, $6, $7, $8)
+    `insert into ox_artifacts (artifact_type, source_session_id, source_event_id, agent_id, deployment_target, title, content_summary, metadata_json, subject_agent_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
      on conflict (source_event_id, artifact_type) do nothing`,
     [
       artifactType,
@@ -531,8 +656,267 @@ const deriveArtifact = async (
       title,
       contentSummary,
       JSON.stringify(metadata),
+      subjectAgentId,
     ],
   );
+
+  // Axis 1: Record artifact implication if this is a perception artifact
+  if (subjectAgentId && PERCEPTION_ARTIFACT_TYPES.includes(artifactType as typeof PERCEPTION_ARTIFACT_TYPES[number])) {
+    // Get the artifact ID we just inserted
+    const artifactRes = await pool.query(
+      `select id from ox_artifacts where source_event_id = $1 and artifact_type = $2`,
+      [event.event_id, artifactType],
+    );
+
+    if (artifactRes.rowCount && artifactRes.rowCount > 0) {
+      await pool.query(
+        `insert into ox_artifact_implications (artifact_id, issuing_agent_id, subject_agent_id, implication_type, source_event_id)
+         values ($1, $2, $3, $4, $5)
+         on conflict (source_event_id) do nothing`,
+        [
+          artifactRes.rows[0].id,
+          payload.agent_id,
+          subjectAgentId,
+          artifactType,
+          event.event_id,
+        ],
+      );
+    }
+  }
+};
+
+// --- Axis 2: Environment projection logic ---
+
+/**
+ * Project environment state changes to history.
+ */
+const projectEnvironmentChange = async (
+  event: EventEnvelope<AgentEventPayload>,
+): Promise<void> => {
+  if (!event.event_type.startsWith('environment.')) {
+    return;
+  }
+
+  const payload = event.payload;
+  const deploymentTarget = payload.deployment_target as string;
+
+  let changeType = 'updated';
+  if (event.event_type === 'environment.state_removed') {
+    changeType = 'removed';
+  } else if (!payload.previous_state) {
+    changeType = 'created';
+  }
+
+  await pool.query(
+    `insert into ox_environment_history (deployment_target, previous_state_json, new_state_json, change_type, source_event_id)
+     values ($1, $2, $3, $4, $5)
+     on conflict (source_event_id) do nothing`,
+    [
+      deploymentTarget,
+      payload.previous_state ? JSON.stringify(payload.previous_state) : null,
+      payload.new_state ? JSON.stringify(payload.new_state) : '{}',
+      changeType,
+      event.event_id,
+    ],
+  );
+
+  // Upsert current state projection
+  if (event.event_type === 'environment.state_changed' && payload.new_state) {
+    const newState = payload.new_state;
+    await pool.query(
+      `insert into ox_environment_states (deployment_target, cognition_availability, max_throughput_per_minute, throttle_factor, active_window_start, active_window_end, imposed_at, reason)
+       values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (deployment_target)
+       do update set
+         cognition_availability = $2,
+         max_throughput_per_minute = $3,
+         throttle_factor = $4,
+         active_window_start = $5,
+         active_window_end = $6,
+         imposed_at = $7,
+         reason = $8`,
+      [
+        deploymentTarget,
+        newState.cognition_availability ?? 'full',
+        newState.max_throughput_per_minute ?? null,
+        newState.throttle_factor ?? 1.0,
+        newState.active_window_start ?? null,
+        newState.active_window_end ?? null,
+        event.occurred_at,
+        newState.reason ?? null,
+      ],
+    );
+  } else if (event.event_type === 'environment.state_removed') {
+    await pool.query(
+      `delete from ox_environment_states where deployment_target = $1`,
+      [deploymentTarget],
+    );
+  }
+};
+
+/**
+ * Project environment rejections for correlation.
+ */
+const projectEnvironmentRejection = async (
+  event: EventEnvelope<AgentEventPayload>,
+): Promise<void> => {
+  if (event.event_type !== 'agent.action_rejected.environment') {
+    return;
+  }
+
+  const payload = event.payload;
+
+  await pool.query(
+    `insert into ox_environment_rejections (agent_id, deployment_target, rejection_reason, environment_state_json, source_event_id)
+     values ($1, $2, $3, $4, $5)
+     on conflict (source_event_id) do nothing`,
+    [
+      payload.agent_id,
+      payload.deployment_target ?? 'unknown',
+      payload.rejection_reason ?? 'unknown',
+      JSON.stringify(payload.environment_state ?? {}),
+      event.event_id,
+    ],
+  );
+};
+
+// --- Axis 4: Deployment patterns projection logic ---
+
+/**
+ * Update deployment-specific patterns after processing an event.
+ * Tracks behavior differences across deployment targets.
+ */
+const updateDeploymentPatterns = async (
+  agentId: string,
+  deploymentTarget: string,
+  eventTs: Date,
+  eventType: string,
+  _actionType: string | null,
+): Promise<void> => {
+  // Only track action patterns
+  if (!eventType.startsWith('agent.action_')) {
+    return;
+  }
+
+  const windowEnd = new Date(eventTs);
+  const windowStart = new Date(windowEnd.getTime() - PATTERN_WINDOW_HOURS * 60 * 60 * 1000);
+
+  // Compute deployment-specific action frequency
+  const freqRes = await pool.query(
+    `select
+       action_type,
+       count(*) as count,
+       count(*) filter (where type = 'agent.action_accepted') as accepted_count,
+       count(*) filter (where type = 'agent.action_rejected') as rejected_count
+     from ox_live_events
+     where agent_id = $1
+       and deployment_target = $2
+       and ts >= $3
+       and ts <= $4
+       and type like 'agent.action_%'
+     group by action_type`,
+    [agentId, deploymentTarget, windowStart, windowEnd],
+  );
+
+  if (freqRes.rowCount === 0) {
+    return;
+  }
+
+  const actionFrequency: Record<string, { total: number; accepted: number; rejected: number }> = {};
+  let totalActions = 0;
+
+  for (const row of freqRes.rows) {
+    if (row.action_type) {
+      actionFrequency[row.action_type] = {
+        total: Number(row.count),
+        accepted: Number(row.accepted_count),
+        rejected: Number(row.rejected_count),
+      };
+      totalActions += Number(row.count);
+    }
+  }
+
+  // Build observation
+  const observation = {
+    action_frequency: actionFrequency,
+    total_actions: totalActions,
+    window_hours: PATTERN_WINDOW_HOURS,
+    deployment_target: deploymentTarget,
+  };
+
+  // Upsert deployment pattern
+  await pool.query(
+    `insert into ox_agent_deployment_patterns (agent_id, deployment_target, pattern_type, window_start, window_end, observation_json, event_count)
+     values ($1, $2, 'activity_summary', $3, $4, $5, $6)
+     on conflict (agent_id, deployment_target, pattern_type, window_start)
+     do update set observation_json = $5, event_count = $6`,
+    [agentId, deploymentTarget, windowStart, windowEnd, JSON.stringify(observation), totalActions],
+  );
+};
+
+/**
+ * Compute drift between deployment targets for an agent.
+ * Called periodically or on-demand.
+ */
+const computeDeploymentDrift = async (
+  agentId: string,
+  windowEnd: Date,
+): Promise<void> => {
+  // Get all deployment patterns for this agent at this window
+  const patternsRes = await pool.query(
+    `select deployment_target, observation_json
+     from ox_agent_deployment_patterns
+     where agent_id = $1 and window_end = $2 and pattern_type = 'activity_summary'`,
+    [agentId, windowEnd],
+  );
+
+  if ((patternsRes.rowCount ?? 0) < 2) {
+    return; // Need at least 2 deployments to compute drift
+  }
+
+  const patterns = patternsRes.rows;
+
+  // Compare each pair of deployments
+  for (let i = 0; i < patterns.length; i++) {
+    for (let j = i + 1; j < patterns.length; j++) {
+      const deployA = patterns[i].deployment_target;
+      const deployB = patterns[j].deployment_target;
+      const obsA = patterns[i].observation_json;
+      const obsB = patterns[j].observation_json;
+
+      // Compute drift summary
+      const driftSummary: Record<string, unknown> = {
+        total_actions_delta: (obsA.total_actions ?? 0) - (obsB.total_actions ?? 0),
+        action_type_differences: {} as Record<string, unknown>,
+      };
+
+      // Find action type differences
+      const allActionTypes = new Set([
+        ...Object.keys(obsA.action_frequency ?? {}),
+        ...Object.keys(obsB.action_frequency ?? {}),
+      ]);
+
+      for (const actionType of allActionTypes) {
+        const freqA = obsA.action_frequency?.[actionType] ?? { total: 0, accepted: 0, rejected: 0 };
+        const freqB = obsB.action_frequency?.[actionType] ?? { total: 0, accepted: 0, rejected: 0 };
+
+        (driftSummary.action_type_differences as Record<string, unknown>)[actionType] = {
+          total_delta: freqA.total - freqB.total,
+          acceptance_rate_a: freqA.total > 0 ? freqA.accepted / freqA.total : null,
+          acceptance_rate_b: freqB.total > 0 ? freqB.accepted / freqB.total : null,
+        };
+      }
+
+      // Upsert drift record
+      await pool.query(
+        `insert into ox_deployment_drift (agent_id, deployment_a, deployment_b, pattern_type, window_end, drift_summary_json)
+         values ($1, $2, $3, 'activity_summary', $4, $5)
+         on conflict (agent_id, deployment_a, deployment_b, pattern_type, window_end)
+         do update set drift_summary_json = $5`,
+        [agentId, deployA, deployB, windowEnd, JSON.stringify(driftSummary)],
+      );
+    }
+  }
 };
 
 // --- Capacity timeline projection logic (Phase D) ---
@@ -690,6 +1074,38 @@ const handleEvent = async (event: EventEnvelope<AgentEventPayload>): Promise<voi
   } catch (err) {
     app.log.warn({ err, event_id: event.event_id }, 'Capacity timeline projection warning');
   }
+
+  // 7. Axis 2: Environment change projection
+  try {
+    await projectEnvironmentChange(event);
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Environment change projection warning');
+  }
+
+  // 8. Axis 2: Environment rejection projection
+  try {
+    await projectEnvironmentRejection(event);
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Environment rejection projection warning');
+  }
+
+  // 9. Axis 4: Deployment-specific patterns
+  try {
+    await updateDeploymentPatterns(agentId, deploymentTarget, eventTs, event.event_type, actionType);
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Deployment pattern update warning');
+  }
+
+  // 10. Axis 4: Compute drift (periodically, every 100 events or so)
+  // This is a heuristic to avoid computing drift on every event
+  try {
+    const shouldComputeDrift = Math.random() < 0.01; // ~1% of events
+    if (shouldComputeDrift && event.event_type.startsWith('agent.action_')) {
+      await computeDeploymentDrift(agentId, eventTs);
+    }
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Deployment drift computation warning');
+  }
 };
 
 // --- Start consumer ---
@@ -740,6 +1156,7 @@ app.get('/ox/live', {
 }, async (request) => {
   const query = request.query as LiveQueryParams;
   const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
   const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
 
   const res = await pool.query(
@@ -750,8 +1167,8 @@ app.get('/ox/live', {
     [limit],
   );
 
-  // Log observer access (Phase E3)
-  await logObserverAccess('/ox/live', query as Record<string, unknown>, res.rowCount ?? 0, observerId);
+  // Log observer access with role (Axis 3)
+  await logObserverAccess('/ox/live', query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
 
   return {
     events: res.rows.map((row) => ({
@@ -778,6 +1195,7 @@ app.get('/ox/sessions', {
 }, async (request) => {
   const query = request.query as SessionsQueryParams;
   const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
   const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
 
   const res = await pool.query(
@@ -789,8 +1207,8 @@ app.get('/ox/sessions', {
     [limit],
   );
 
-  // Log observer access
-  await logObserverAccess('/ox/sessions', query as Record<string, unknown>, res.rowCount ?? 0, observerId);
+  // Log observer access with role
+  await logObserverAccess('/ox/sessions', query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
 
   return {
     sessions: res.rows.map((row) => ({
@@ -809,6 +1227,7 @@ app.get('/ox/sessions', {
 app.get('/ox/sessions/:id', async (request, reply) => {
   const { id } = request.params as { id: string };
   const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
 
   const sessionRes = await pool.query(
     `select session_id, start_ts, end_ts, participating_agent_ids, deployment_target,
@@ -833,8 +1252,8 @@ app.get('/ox/sessions/:id', async (request, reply) => {
     [id],
   );
 
-  // Log observer access
-  await logObserverAccess(`/ox/sessions/${id}`, {}, eventsRes.rowCount ?? 0, observerId);
+  // Log observer access with role
+  await logObserverAccess(`/ox/sessions/${id}`, {}, eventsRes.rowCount ?? 0, observerId, observerRole);
 
   return {
     session: {
@@ -890,12 +1309,13 @@ app.get('/ox/agents/:id/patterns', async (request, reply) => {
   };
 });
 
-// --- Read-only API: Artifacts (Phase C) ---
+// --- Read-only API: Artifacts (Phase C + Axis 1) ---
 
 interface ArtifactsQueryParams {
   session_id?: string;
   agent_id?: string;
   artifact_type?: string;
+  subject_agent_id?: string; // Axis 1: Filter by subject
   limit?: string;
 }
 
@@ -904,11 +1324,12 @@ app.get('/ox/artifacts', {
 }, async (request) => {
   const query = request.query as ArtifactsQueryParams;
   const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
   const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
 
   let sql = `
     select id, artifact_type, source_session_id, source_event_id, agent_id, deployment_target,
-           title, content_summary, metadata_json as metadata, created_at
+           title, content_summary, metadata_json as metadata, subject_agent_id, created_at
     from ox_artifacts
     where 1=1
   `;
@@ -927,14 +1348,19 @@ app.get('/ox/artifacts', {
     sql += ` and artifact_type = $${paramIndex++}`;
     params.push(query.artifact_type);
   }
+  // Axis 1: Filter by subject agent
+  if (query.subject_agent_id) {
+    sql += ` and subject_agent_id = $${paramIndex++}`;
+    params.push(query.subject_agent_id);
+  }
 
   sql += ` order by created_at desc limit $${paramIndex}`;
   params.push(limit);
 
   const res = await pool.query(sql, params);
 
-  // Log observer access (Phase E3)
-  await logObserverAccess('/ox/artifacts', query as Record<string, unknown>, res.rowCount ?? 0, observerId);
+  // Log observer access with role (Axis 3)
+  await logObserverAccess('/ox/artifacts', query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
 
   return {
     artifacts: res.rows.map((row) => ({
@@ -943,6 +1369,7 @@ app.get('/ox/artifacts', {
       source_session_id: row.source_session_id,
       source_event_id: row.source_event_id,
       agent_id: row.agent_id,
+      subject_agent_id: row.subject_agent_id,
       deployment_target: row.deployment_target,
       title: row.title,
       content_summary: row.content_summary,
@@ -955,17 +1382,18 @@ app.get('/ox/artifacts', {
 app.get('/ox/artifacts/:id', async (request, reply) => {
   const { id } = request.params as { id: string };
   const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
 
   const res = await pool.query(
     `select id, artifact_type, source_session_id, source_event_id, agent_id, deployment_target,
-            title, content_summary, metadata_json as metadata, created_at
+            title, content_summary, metadata_json as metadata, subject_agent_id, created_at
      from ox_artifacts
      where id = $1`,
     [id],
   );
 
-  // Log observer access
-  await logObserverAccess(`/ox/artifacts/${id}`, {}, res.rowCount ?? 0, observerId);
+  // Log observer access with role
+  await logObserverAccess(`/ox/artifacts/${id}`, {}, res.rowCount ?? 0, observerId, observerRole);
 
   if (res.rowCount === 0) {
     reply.status(404);
@@ -980,6 +1408,7 @@ app.get('/ox/artifacts/:id', async (request, reply) => {
       source_session_id: row.source_session_id,
       source_event_id: row.source_event_id,
       agent_id: row.agent_id,
+      subject_agent_id: row.subject_agent_id,
       deployment_target: row.deployment_target,
       title: row.title,
       content_summary: row.content_summary,
@@ -995,6 +1424,13 @@ app.get('/ox/agents/:id/economics', async (request, reply) => {
   const { id } = request.params as { id: string };
   const query = request.query as { hours?: string };
   const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/agents')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
   const hours = Math.min(Math.max(Number(query.hours) || 24, 1), 168); // Max 1 week
 
   const windowStart = new Date(Date.now() - hours * 60 * 60 * 1000);
@@ -1048,8 +1484,8 @@ app.get('/ox/agents/:id/economics', async (request, reply) => {
     (new Date(newestEvent.ts).getTime() - new Date(oldestEvent.ts).getTime()) / (1000 * 60 * 60);
   const burnRate = timeSpanHours > 0 ? totalCost / timeSpanHours : 0;
 
-  // Log observer access
-  await logObserverAccess(`/ox/agents/${id}/economics`, { hours }, timelineRes.rowCount ?? 0, observerId);
+  // Log observer access with role
+  await logObserverAccess(`/ox/agents/${id}/economics`, { hours }, timelineRes.rowCount ?? 0, observerId, observerRole);
 
   return {
     agent_id: id,
@@ -1075,9 +1511,16 @@ app.get('/ox/agents/:id/economics', async (request, reply) => {
 
 // --- Read-only API: System Self-Inspection (Phase F) ---
 
-app.get('/ox/system/throughput', async (request) => {
+app.get('/ox/system/throughput', async (request, reply) => {
   const query = request.query as { hours?: string };
   const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/system')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
   const hours = Math.min(Math.max(Number(query.hours) || 1, 1), 24);
   const windowStart = new Date(Date.now() - hours * 60 * 60 * 1000);
 
@@ -1102,7 +1545,7 @@ app.get('/ox/system/throughput', async (request) => {
     ? (Number(row.total_events) / (timeSpanMs / 60000))
     : 0;
 
-  await logObserverAccess('/ox/system/throughput', { hours }, 1, observerId);
+  await logObserverAccess('/ox/system/throughput', { hours }, 1, observerId, observerRole);
 
   return {
     window_hours: hours,
@@ -1116,8 +1559,14 @@ app.get('/ox/system/throughput', async (request) => {
   };
 });
 
-app.get('/ox/system/event-lag', async (request) => {
+app.get('/ox/system/event-lag', async (request, reply) => {
   const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/system')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
 
   // Get the most recent events and their materialization times
   const res = await pool.query(
@@ -1138,7 +1587,7 @@ app.get('/ox/system/event-lag', async (request) => {
      where consumer_group = 'ox-read-materializer'`,
   );
 
-  await logObserverAccess('/ox/system/event-lag', {}, res.rowCount ?? 0, observerId);
+  await logObserverAccess('/ox/system/event-lag', {}, res.rowCount ?? 0, observerId, observerRole);
 
   return {
     recent_events: res.rows.map((row) => ({
@@ -1156,8 +1605,14 @@ app.get('/ox/system/event-lag', async (request) => {
   };
 });
 
-app.get('/ox/system/projection-health', async (request) => {
+app.get('/ox/system/projection-health', async (request, reply) => {
   const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/system')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
 
   // Get counts from all projection tables
   const [liveRes, sessionsRes, patternsRes, artifactsRes, timelineRes, accessRes] = await Promise.all([
@@ -1169,7 +1624,7 @@ app.get('/ox/system/projection-health', async (request) => {
     pool.query('select count(*) as count from observer_access_log where accessed_at > now() - interval \'1 hour\''),
   ]);
 
-  await logObserverAccess('/ox/system/projection-health', {}, 1, observerId);
+  await logObserverAccess('/ox/system/projection-health', {}, 1, observerId, observerRole);
 
   return {
     projections: {
@@ -1185,6 +1640,452 @@ app.get('/ox/system/projection-health', async (request) => {
     observer_access_last_hour: Number(accessRes.rows[0].count),
     consumer_initialized: consumerInitialized,
     health: consumerInitialized ? 'healthy' : 'degraded',
+  };
+});
+
+// --- Axis 1: Inter-Agent Perception Endpoints ---
+
+// Get artifacts where an agent is the subject (perceived by others)
+app.get('/ox/agents/:id/perceived-by', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, `/ox/agents/${id}/perceived-by`)) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select a.id, a.artifact_type, a.agent_id as issuing_agent_id, a.title, a.content_summary,
+            a.metadata_json as metadata, a.created_at,
+            i.implication_type
+     from ox_artifacts a
+     join ox_artifact_implications i on i.artifact_id = a.id
+     where i.subject_agent_id = $1
+     order by a.created_at desc
+     limit $2`,
+    [id, limit],
+  );
+
+  await logObserverAccess(`/ox/agents/${id}/perceived-by`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    subject_agent_id: id,
+    perceptions: res.rows.map((row) => ({
+      artifact_id: row.id,
+      artifact_type: row.artifact_type,
+      issuing_agent_id: row.issuing_agent_id,
+      implication_type: row.implication_type,
+      title: row.title,
+      content_summary: row.content_summary,
+      metadata: row.metadata,
+      created_at: row.created_at,
+    })),
+  };
+});
+
+// Get artifacts an agent has issued about others
+app.get('/ox/agents/:id/perceptions-issued', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, `/ox/agents/${id}/perceptions-issued`)) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select a.id, a.artifact_type, a.subject_agent_id, a.title, a.content_summary,
+            a.metadata_json as metadata, a.created_at,
+            i.implication_type
+     from ox_artifacts a
+     join ox_artifact_implications i on i.artifact_id = a.id
+     where i.issuing_agent_id = $1
+     order by a.created_at desc
+     limit $2`,
+    [id, limit],
+  );
+
+  await logObserverAccess(`/ox/agents/${id}/perceptions-issued`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    issuing_agent_id: id,
+    perceptions: res.rows.map((row) => ({
+      artifact_id: row.id,
+      artifact_type: row.artifact_type,
+      subject_agent_id: row.subject_agent_id,
+      implication_type: row.implication_type,
+      title: row.title,
+      content_summary: row.content_summary,
+      metadata: row.metadata,
+      created_at: row.created_at,
+    })),
+  };
+});
+
+// --- Axis 2: Environment State Endpoints ---
+
+app.get('/ox/environment', async (request, reply) => {
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/environment')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const res = await pool.query(
+    `select deployment_target, cognition_availability, max_throughput_per_minute,
+            throttle_factor, active_window_start, active_window_end, imposed_at, reason
+     from ox_environment_states
+     order by deployment_target`,
+  );
+
+  await logObserverAccess('/ox/environment', {}, res.rowCount ?? 0, observerId, observerRole);
+
+  return { environment_states: res.rows };
+});
+
+app.get('/ox/environment/:target/history', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/environment')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select id, previous_state_json, new_state_json, change_type, source_event_id, changed_at
+     from ox_environment_history
+     where deployment_target = $1
+     order by changed_at desc
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/environment/${target}/history`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    deployment_target: target,
+    history: res.rows.map((row) => ({
+      id: row.id,
+      previous_state: row.previous_state_json,
+      new_state: row.new_state_json,
+      change_type: row.change_type,
+      source_event_id: row.source_event_id,
+      changed_at: row.changed_at,
+    })),
+  };
+});
+
+app.get('/ox/environment/:target/rejections', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string; agent_id?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/environment')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  let sql = `
+    select id, agent_id, rejection_reason, environment_state_json, source_event_id, rejected_at
+    from ox_environment_rejections
+    where deployment_target = $1
+  `;
+  const params: unknown[] = [target];
+  let paramIndex = 2;
+
+  if (query.agent_id) {
+    sql += ` and agent_id = $${paramIndex++}`;
+    params.push(query.agent_id);
+  }
+
+  sql += ` order by rejected_at desc limit $${paramIndex}`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  await logObserverAccess(`/ox/environment/${target}/rejections`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    deployment_target: target,
+    rejections: res.rows.map((row) => ({
+      id: row.id,
+      agent_id: row.agent_id,
+      rejection_reason: row.rejection_reason,
+      environment_state: row.environment_state_json,
+      source_event_id: row.source_event_id,
+      rejected_at: row.rejected_at,
+    })),
+  };
+});
+
+// --- Axis 3: Observer Self-Inspection Endpoints ---
+
+// Observer self-registration
+app.post('/ox/observers/register', async (request) => {
+  const body = request.body as { observer_id: string; role?: string; metadata?: Record<string, unknown> };
+  const observerId = body.observer_id;
+
+  // Validate role
+  let role: ObserverRole = 'viewer';
+  if (body.role && OBSERVER_ROLES.includes(body.role as ObserverRole)) {
+    role = body.role as ObserverRole;
+  }
+
+  await pool.query(
+    `insert into ox_observers (observer_id, observer_role, metadata_json)
+     values ($1, $2::observer_role, $3)
+     on conflict (observer_id)
+     do update set observer_role = $2::observer_role, metadata_json = $3, last_seen_at = now()`,
+    [observerId, role, JSON.stringify(body.metadata ?? {})],
+  );
+
+  return {
+    ok: true,
+    observer_id: observerId,
+    observer_role: role,
+  };
+});
+
+// Observer self-inspection
+app.get('/ox/observers/me', async (request, reply) => {
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+
+  if (!observerId) {
+    reply.status(400);
+    return { error: 'x-observer-id header required' };
+  }
+
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/observers')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const res = await pool.query(
+    `select observer_id, observer_role, registered_at, last_seen_at, access_count, metadata_json
+     from ox_observers
+     where observer_id = $1`,
+    [observerId],
+  );
+
+  // Get recent access log
+  const accessRes = await pool.query(
+    `select endpoint, query_params_json, response_count, accessed_at
+     from observer_access_log
+     where observer_id = $1
+     order by accessed_at desc
+     limit 20`,
+    [observerId],
+  );
+
+  await logObserverAccess('/ox/observers/me', {}, 1, observerId, observerRole);
+
+  if (res.rowCount === 0) {
+    return {
+      observer_id: observerId,
+      registered: false,
+      observer_role: observerRole,
+      recent_access: accessRes.rows,
+    };
+  }
+
+  const row = res.rows[0];
+  return {
+    observer_id: row.observer_id,
+    registered: true,
+    observer_role: row.observer_role,
+    registered_at: row.registered_at,
+    last_seen_at: row.last_seen_at,
+    access_count: row.access_count,
+    metadata: row.metadata_json,
+    recent_access: accessRes.rows,
+  };
+});
+
+// List all observers (auditor only)
+app.get('/ox/observers', async (request, reply) => {
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/observers')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select observer_id, observer_role, registered_at, last_seen_at, access_count
+     from ox_observers
+     order by last_seen_at desc
+     limit $1`,
+    [limit],
+  );
+
+  await logObserverAccess('/ox/observers', query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { observers: res.rows };
+});
+
+// --- Axis 4: Deployment Drift Endpoints ---
+
+// Get deployment patterns for an agent
+app.get('/ox/agents/:id/deployment-patterns', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = request.query as { deployment_target?: string; limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/drift')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+
+  let sql = `
+    select deployment_target, pattern_type, window_start, window_end, observation_json, event_count, created_at
+    from ox_agent_deployment_patterns
+    where agent_id = $1
+  `;
+  const params: unknown[] = [id];
+  let paramIndex = 2;
+
+  if (query.deployment_target) {
+    sql += ` and deployment_target = $${paramIndex++}`;
+    params.push(query.deployment_target);
+  }
+
+  sql += ` order by window_end desc limit $${paramIndex}`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  await logObserverAccess(`/ox/agents/${id}/deployment-patterns`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    agent_id: id,
+    patterns: res.rows.map((row) => ({
+      deployment_target: row.deployment_target,
+      pattern_type: row.pattern_type,
+      window_start: row.window_start,
+      window_end: row.window_end,
+      observation: row.observation_json,
+      event_count: row.event_count,
+      created_at: row.created_at,
+    })),
+  };
+});
+
+// Get drift observations for an agent
+app.get('/ox/agents/:id/drift', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/drift')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+
+  const res = await pool.query(
+    `select id, deployment_a, deployment_b, pattern_type, window_end, drift_summary_json, created_at
+     from ox_deployment_drift
+     where agent_id = $1
+     order by window_end desc
+     limit $2`,
+    [id, limit],
+  );
+
+  await logObserverAccess(`/ox/agents/${id}/drift`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    agent_id: id,
+    drift_observations: res.rows.map((row) => ({
+      id: row.id,
+      deployment_a: row.deployment_a,
+      deployment_b: row.deployment_b,
+      pattern_type: row.pattern_type,
+      window_end: row.window_end,
+      drift_summary: row.drift_summary_json,
+      created_at: row.created_at,
+    })),
+  };
+});
+
+// System-wide drift summary (auditor only)
+app.get('/ox/drift/summary', async (request, reply) => {
+  const query = request.query as { hours?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/drift')) {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const hours = Math.min(Math.max(Number(query.hours) || 24, 1), 168);
+  const windowStart = new Date(Date.now() - hours * 60 * 60 * 1000);
+
+  // Get agents with drift observations
+  const res = await pool.query(
+    `select d.agent_id, count(distinct d.id) as drift_count,
+            array_agg(distinct d.deployment_a) || array_agg(distinct d.deployment_b) as deployments
+     from ox_deployment_drift d
+     where d.created_at >= $1
+     group by d.agent_id
+     order by drift_count desc
+     limit 50`,
+    [windowStart],
+  );
+
+  // Get deployment target counts
+  const deploymentRes = await pool.query(
+    `select deployment_target, count(distinct agent_id) as agent_count
+     from ox_agent_deployment_patterns
+     where created_at >= $1
+     group by deployment_target
+     order by agent_count desc`,
+    [windowStart],
+  );
+
+  await logObserverAccess('/ox/drift/summary', query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    window_hours: hours,
+    agents_with_drift: res.rows.map((row) => ({
+      agent_id: row.agent_id,
+      drift_observation_count: Number(row.drift_count),
+      deployments: [...new Set(row.deployments.filter(Boolean))],
+    })),
+    deployments: deploymentRes.rows.map((row) => ({
+      deployment_target: row.deployment_target,
+      agent_count: Number(row.agent_count),
+    })),
   };
 });
 
