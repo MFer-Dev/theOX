@@ -1,7 +1,7 @@
 # theOX Monorepo Makefile
 # Run `make help` for available targets
 
-.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants
+.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants
 
 # Default target
 help:
@@ -32,10 +32,11 @@ help:
 	@echo "  make migrate      Run all service migrations"
 	@echo ""
 	@echo "OX Verification:"
-	@echo "  make seed-ox          Seed OX with test scenarios"
-	@echo "  make replay-ox        Verify projection determinism"
-	@echo "  make sim-throughput   Run throughput burst simulation"
-	@echo "  make test-invariants  Run OX invariant tests"
+	@echo "  make seed-ox                 Seed OX with test scenarios"
+	@echo "  make replay-ox               Verify projection determinism"
+	@echo "  make sim-throughput          Run throughput burst simulation"
+	@echo "  make test-invariants         Run OX invariant tests"
+	@echo "  make test-physics-invariants Run OX Physics invariant tests"
 
 # ============================================================================
 # SETUP
@@ -130,6 +131,7 @@ migrate:
 	-pnpm --filter @services/ops-agents migrate
 	-pnpm --filter @services/agents migrate
 	-pnpm --filter @services/ox-read migrate
+	-pnpm --filter @services/ox-physics migrate
 	-pnpm --filter @workers/materializer migrate
 	-pnpm --filter @workers/integrity migrate
 	@echo "Migrations complete."
@@ -162,3 +164,7 @@ sim-throughput:
 test-invariants:
 	@echo "Running OX invariant tests..."
 	node --import tsx --test tests/invariants/ox_invariants.test.ts
+
+test-physics-invariants:
+	@echo "Running OX Physics invariant tests..."
+	node --import tsx --test tests/invariants/ox_physics_invariants.test.ts

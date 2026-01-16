@@ -103,6 +103,7 @@ pnpm --filter @services/discourse migrate
 pnpm --filter @services/safety migrate
 pnpm --filter @services/agents migrate
 pnpm --filter @services/ox-read migrate
+pnpm --filter @services/ox-physics migrate
 ```
 
 ### Check Code Quality
@@ -270,6 +271,14 @@ See [docs/OX_LAWS.md](./OX_LAWS.md) for the ten system laws.
 - `GET /ox/artifacts` - Artifacts (analyst+)
 - `GET /ox/environment` - Environment state (auditor)
 - `GET /ox/system/projection-health` - System health (auditor)
+
+**OX Physics (localhost:4019):**
+- `GET /regimes` - List all regimes
+- `GET /deployments` - List deployment physics states
+- `GET /deployments/:target` - Get deployment state + events
+- `POST /deployments/:target/apply-regime` - Apply regime (ops)
+- `POST /deployments/:target/tick` - Manual physics tick (ops)
+- `GET /events` - Physics event history
 
 Observer roles: `viewer` < `analyst` < `auditor`
 

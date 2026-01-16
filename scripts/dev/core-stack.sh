@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LOG_DIR="${ROOT}/logs"
 PID_FILE="${ROOT}/.pids/core-stack.json"
-SERVICES=(identity cred discourse purge endorse safety trustgraph notifications search messaging lists gateway ops-gateway ops-agents agents ox-read)
+SERVICES=(identity cred discourse purge endorse safety trustgraph notifications search messaging lists gateway ops-gateway ops-agents agents ox-read ox-physics)
 URLS=(
   "http://localhost:4001/readyz"
   "http://localhost:4004/readyz"
@@ -22,6 +22,7 @@ URLS=(
   "http://localhost:4014/readyz"
   "http://localhost:4017/readyz"
   "http://localhost:4018/readyz"
+  "http://localhost:4019/readyz"
 )
 
 mkdir -p "${LOG_DIR}"
@@ -119,6 +120,7 @@ start_all() {
   echo "  ops-agents    http://localhost:4014"
   echo "  agents        http://localhost:4017"
   echo "  ox-read       http://localhost:4018"
+  echo "  ox-physics    http://localhost:4019"
 }
 
 stop_all() {

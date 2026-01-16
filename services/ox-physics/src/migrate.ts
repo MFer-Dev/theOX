@@ -216,7 +216,7 @@ insert into ox_regimes (
   base_throughput_cap, base_throttle_factor, base_cognition_availability, base_burst_allowance,
   throughput_variance_pct, throttle_variance_pct, storm_probability, drought_probability
 ) values (
-  'storm', 'High variance, frequent disruptions', false,
+  'storm', 'High variance, frequent disruptions',
   50, 2.0, 'degraded', 10,
   30.0, 30.0, 0.3, 0.1
 ) on conflict (name) do nothing;
@@ -226,7 +226,7 @@ insert into ox_regimes (
   base_throughput_cap, base_throttle_factor, base_cognition_availability, base_burst_allowance,
   throughput_variance_pct, throttle_variance_pct, storm_probability, drought_probability
 ) values (
-  'drought', 'Severe resource scarcity', false,
+  'drought', 'Severe resource scarcity',
   20, 3.0, 'degraded', 5,
   10.0, 10.0, 0.05, 0.4
 ) on conflict (name) do nothing;
@@ -236,7 +236,7 @@ insert into ox_regimes (
   base_throughput_cap, base_throttle_factor, base_cognition_availability, base_burst_allowance,
   throughput_variance_pct, throttle_variance_pct, storm_probability, drought_probability
 ) values (
-  'swarm', 'High throughput, optimized for load testing', false,
+  'swarm', 'High throughput, optimized for load testing',
   500, 0.5, 'full', 100,
   5.0, 5.0, 0.01, 0.01
 ) on conflict (name) do nothing;

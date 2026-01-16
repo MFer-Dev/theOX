@@ -57,25 +57,31 @@ const PHYSICS_SEED = process.env.PHYSICS_SEED ? BigInt(process.env.PHYSICS_SEED)
 
 // --- Seeded RNG for deterministic replay ---
 
+// PostgreSQL bigint max: 9223372036854775807 (2^63 - 1)
+const BIGINT_MAX = BigInt('9223372036854775807');
+
 class SeededRNG {
   private seed: bigint;
   private sequence: number;
 
   constructor(seed: bigint, sequence = 0) {
-    this.seed = seed;
+    // Ensure seed is within PostgreSQL bigint range
+    this.seed = seed % BIGINT_MAX;
+    if (this.seed < 0n) this.seed = -this.seed;
     this.sequence = sequence;
   }
 
   /**
-   * Linear congruential generator with 64-bit arithmetic
-   * Constants from Knuth MMIX
+   * Linear congruential generator with bounded arithmetic
+   * Uses modular arithmetic to stay within PostgreSQL bigint range
    */
   next(): number {
     const a = BigInt('6364136223846793005');
     const c = BigInt('1442695040888963407');
-    const m = BigInt('18446744073709551616'); // 2^64
 
-    this.seed = (a * this.seed + c) % m;
+    // Use BIGINT_MAX as modulus to stay within PostgreSQL range
+    this.seed = ((a * this.seed + c) % BIGINT_MAX);
+    if (this.seed < 0n) this.seed = -this.seed;
     this.sequence++;
 
     // Return as float in [0, 1)
@@ -126,12 +132,12 @@ function getRNG(deploymentTarget: string, seed?: bigint, sequence?: number): See
 const appendEvent = async (
   eventType: string,
   payload: Record<string, unknown>,
-  actorId?: string,
+  _actorId?: string,
   correlationId?: string,
   idempotencyKey?: string,
 ) => {
   const evt = buildEvent(eventType, payload, {
-    actorId: actorId ?? 'ox-physics',
+    actorId: undefined, // Physics engine has no agent identity
     correlationId,
   });
   await persistEvent(pool, evt, { idempotencyKey, context: payload });
