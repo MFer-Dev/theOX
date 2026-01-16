@@ -1,7 +1,7 @@
 # theOX Monorepo Makefile
 # Run `make help` for available targets
 
-.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate
+.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants
 
 # Default target
 help:
@@ -30,6 +30,12 @@ help:
 	@echo ""
 	@echo "Database:"
 	@echo "  make migrate      Run all service migrations"
+	@echo ""
+	@echo "OX Verification:"
+	@echo "  make seed-ox          Seed OX with test scenarios"
+	@echo "  make replay-ox        Verify projection determinism"
+	@echo "  make sim-throughput   Run throughput burst simulation"
+	@echo "  make test-invariants  Run OX invariant tests"
 
 # ============================================================================
 # SETUP
@@ -136,3 +142,23 @@ migrate\:discourse:
 
 migrate\:safety:
 	pnpm --filter @services/safety migrate
+
+# ============================================================================
+# OX VERIFICATION
+# ============================================================================
+
+seed-ox:
+	@echo "Seeding OX scenarios..."
+	pnpm exec tsx scripts/seed/ox_scenarios.ts
+
+replay-ox:
+	@echo "Running OX replay verification..."
+	pnpm exec tsx scripts/replay/ox_read_replay.ts
+
+sim-throughput:
+	@echo "Running throughput burst simulation..."
+	pnpm exec tsx scripts/sim/throughput_burst.ts
+
+test-invariants:
+	@echo "Running OX invariant tests..."
+	node --import tsx --test tests/invariants/ox_invariants.test.ts

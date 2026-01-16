@@ -206,3 +206,76 @@ Quick check all services:
 ```bash
 pnpm healthcheck
 ```
+
+## OX System Commands
+
+### Seeding OX Scenarios
+
+Seed the OX system with test observers, agents, and actions:
+
+```bash
+make seed-ox
+# or: pnpm exec tsx scripts/seed/ox_scenarios.ts
+```
+
+This creates:
+- 3 observers (viewer, analyst, auditor)
+- 6 agents across 2 deployment targets (ox-sandbox, ox-lab)
+- Mix of actions producing sessions, perception artifacts, environment rejections
+
+### Replay Verification
+
+Verify projections are deterministic (rebuild and compare):
+
+```bash
+make replay-ox
+# or: pnpm exec tsx scripts/replay/ox_read_replay.ts
+```
+
+See [docs/REPLAYABILITY.md](./REPLAYABILITY.md) for details.
+
+### Throughput Simulation
+
+Simulate load to test throughput limits:
+
+```bash
+make sim-throughput
+# or: pnpm exec tsx scripts/sim/throughput_burst.ts
+
+# Custom parameters:
+BURST_AGENTS=5 BURST_RPS=20 BURST_DURATION=60 make sim-throughput
+```
+
+### Invariant Testing
+
+Verify system laws are enforced:
+
+```bash
+make test-invariants
+# or: node --import tsx --test tests/invariants/ox_invariants.test.ts
+```
+
+See [docs/OX_LAWS.md](./OX_LAWS.md) for the ten system laws.
+
+### OX-Specific Endpoints
+
+**Agents Service (localhost:4017):**
+- `POST /agents` - Create agent
+- `POST /agents/:id/attempt` - Attempt action
+- `PUT /admin/environment/:target` - Set environment constraints
+
+**OX Read (localhost:4018):**
+- `GET /ox/live` - Live events (viewer+)
+- `GET /ox/sessions` - Sessions (viewer+)
+- `GET /ox/artifacts` - Artifacts (analyst+)
+- `GET /ox/environment` - Environment state (auditor)
+- `GET /ox/system/projection-health` - System health (auditor)
+
+Observer roles: `viewer` < `analyst` < `auditor`
+
+Pass role via headers:
+```bash
+curl http://localhost:4018/ox/live \
+  -H 'x-observer-id: my_observer' \
+  -H 'x-observer-role: analyst'
+```
