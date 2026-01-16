@@ -607,6 +607,353 @@ app.get('/admin/outbox', async (request, reply) => {
   return { outbox: rows.rows };
 });
 
+// --- Foundry Control Plane: Sponsor Powers (Phase 3) ---
+// All sponsor influence is INDIRECT and AUDITED.
+// Forbidden: direct messaging, forced actions, memory injection, visibility into private state.
+
+const COGNITION_PROVIDERS = ['none', 'openai', 'anthropic', 'gemini'] as const;
+type CognitionProvider = (typeof COGNITION_PROVIDERS)[number];
+
+const THROTTLE_PROFILES = ['normal', 'conservative', 'aggressive', 'paused'] as const;
+type ThrottleProfile = (typeof THROTTLE_PROFILES)[number];
+
+/**
+ * Audit a sponsor action to the sponsor_actions table.
+ */
+const auditSponsorAction = async (
+  sponsorId: string,
+  agentId: string,
+  actionType: string,
+  details: Record<string, unknown>,
+  eventId?: string,
+) => {
+  await pool.query(
+    `insert into sponsor_actions (sponsor_id, agent_id, action_type, details_json, event_id)
+     values ($1, $2, $3, $4, $5)`,
+    [sponsorId, agentId, actionType, JSON.stringify(details), eventId ?? null],
+  );
+};
+
+// Assign or update sponsor for an agent
+app.post('/agents/:id/sponsor', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = request.body as { sponsor_id: string | null };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Validate sponsor_id
+  if (body.sponsor_id !== null && typeof body.sponsor_id !== 'string') {
+    reply.status(400);
+    return { error: 'sponsor_id must be a string or null' };
+  }
+
+  // Check agent exists
+  const check = await pool.query('select sponsor_id from agents where id = $1', [id]);
+  if (check.rowCount === 0) {
+    reply.status(404);
+    return { error: 'agent not found' };
+  }
+  const previousSponsor = check.rows[0].sponsor_id;
+
+  // Update sponsor
+  await pool.query(
+    `update agents set sponsor_id = $2, updated_at = now() where id = $1`,
+    [id, body.sponsor_id],
+  );
+
+  const evt = await appendEvent(
+    'agent.sponsor_changed',
+    {
+      agent_id: id,
+      previous_sponsor_id: previousSponsor,
+      new_sponsor_id: body.sponsor_id,
+    },
+    body.sponsor_id ?? 'system',
+    correlationId,
+  );
+
+  // Audit the action
+  if (body.sponsor_id) {
+    await auditSponsorAction(body.sponsor_id, id, 'sponsor_assigned', {
+      previous_sponsor_id: previousSponsor,
+    }, evt.event_id);
+  }
+
+  return { ok: true, sponsor_id: body.sponsor_id, event: evt };
+});
+
+// Get agent's sponsor info and control plane state
+app.get('/agents/:id/sponsor', async (request, reply) => {
+  const { id } = request.params as { id: string };
+
+  const res = await pool.query(
+    `select sponsor_id, cognition_provider, throttle_profile from agents where id = $1`,
+    [id],
+  );
+  if (res.rowCount === 0) {
+    reply.status(404);
+    return { error: 'agent not found' };
+  }
+
+  const row = res.rows[0];
+  return {
+    sponsor_id: row.sponsor_id,
+    cognition_provider: row.cognition_provider,
+    throttle_profile: row.throttle_profile,
+  };
+});
+
+// Sponsor power: Allocate capacity to agent
+app.post('/sponsor/:sponsorId/agents/:id/allocate', async (request, reply) => {
+  const { sponsorId, id } = request.params as { sponsorId: string; id: string };
+  const body = request.body as { amount: number };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Validate amount
+  if (typeof body.amount !== 'number') {
+    reply.status(400);
+    return { error: 'amount must be a number' };
+  }
+
+  // Check agent exists and sponsor matches
+  const check = await pool.query('select sponsor_id from agents where id = $1', [id]);
+  if (check.rowCount === 0) {
+    reply.status(404);
+    return { error: 'agent not found' };
+  }
+  if (check.rows[0].sponsor_id !== sponsorId) {
+    reply.status(403);
+    return { error: 'sponsor_id does not match agent sponsor' };
+  }
+
+  // Get capacity
+  const capRes = await pool.query(
+    `select balance, max_balance, regen_per_hour, last_reconciled_at, policy
+     from agent_capacity where agent_id = $1 for update`,
+    [id],
+  );
+  if (capRes.rowCount === 0) {
+    reply.status(500);
+    return { error: 'capacity record missing' };
+  }
+
+  const cap = capRes.rows[0] as CapacityRow;
+  const { newBalance, reconciledAt } = reconcileCapacity({ ...cap, agent_id: id });
+
+  // Apply allocation (can be negative for removal)
+  const adjustedBalance = Math.max(0, Math.min(newBalance + body.amount, cap.max_balance));
+
+  await pool.query(
+    `update agent_capacity set balance = $2, last_reconciled_at = $3 where agent_id = $1`,
+    [id, adjustedBalance, reconciledAt],
+  );
+
+  const evt = await appendEvent(
+    'agent.sponsor_capacity_adjusted',
+    {
+      agent_id: id,
+      sponsor_id: sponsorId,
+      amount: body.amount,
+      previous_balance: newBalance,
+      new_balance: adjustedBalance,
+    },
+    sponsorId,
+    correlationId,
+  );
+
+  // Audit the action
+  await auditSponsorAction(sponsorId, id, 'capacity_adjusted', {
+    amount: body.amount,
+    previous_balance: newBalance,
+    new_balance: adjustedBalance,
+  }, evt.event_id);
+
+  return {
+    ok: true,
+    capacity: {
+      previous_balance: newBalance,
+      new_balance: adjustedBalance,
+      max_balance: cap.max_balance,
+    },
+    event: evt,
+  };
+});
+
+// Sponsor power: Select cognition provider for agent
+app.post('/sponsor/:sponsorId/agents/:id/cognition', async (request, reply) => {
+  const { sponsorId, id } = request.params as { sponsorId: string; id: string };
+  const body = request.body as { provider: string };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Validate provider
+  const provider = String(body.provider ?? '').toLowerCase().trim() as CognitionProvider;
+  if (!COGNITION_PROVIDERS.includes(provider)) {
+    reply.status(400);
+    return { error: 'invalid cognition provider', valid_providers: COGNITION_PROVIDERS };
+  }
+
+  // Check agent exists and sponsor matches
+  const check = await pool.query('select sponsor_id, cognition_provider from agents where id = $1', [id]);
+  if (check.rowCount === 0) {
+    reply.status(404);
+    return { error: 'agent not found' };
+  }
+  if (check.rows[0].sponsor_id !== sponsorId) {
+    reply.status(403);
+    return { error: 'sponsor_id does not match agent sponsor' };
+  }
+  const previousProvider = check.rows[0].cognition_provider;
+
+  // Update cognition provider
+  await pool.query(
+    `update agents set cognition_provider = $2::cognition_provider, updated_at = now() where id = $1`,
+    [id, provider],
+  );
+
+  const evt = await appendEvent(
+    'agent.cognition_provider_changed',
+    {
+      agent_id: id,
+      sponsor_id: sponsorId,
+      previous_provider: previousProvider,
+      new_provider: provider,
+    },
+    sponsorId,
+    correlationId,
+  );
+
+  // Audit the action
+  await auditSponsorAction(sponsorId, id, 'cognition_provider_changed', {
+    previous_provider: previousProvider,
+    new_provider: provider,
+  }, evt.event_id);
+
+  return { ok: true, cognition_provider: provider, event: evt };
+});
+
+// Sponsor power: Set throttle profile for agent
+app.post('/sponsor/:sponsorId/agents/:id/throttle', async (request, reply) => {
+  const { sponsorId, id } = request.params as { sponsorId: string; id: string };
+  const body = request.body as { profile: string };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Validate profile
+  const profile = String(body.profile ?? '').toLowerCase().trim() as ThrottleProfile;
+  if (!THROTTLE_PROFILES.includes(profile)) {
+    reply.status(400);
+    return { error: 'invalid throttle profile', valid_profiles: THROTTLE_PROFILES };
+  }
+
+  // Check agent exists and sponsor matches
+  const check = await pool.query('select sponsor_id, throttle_profile from agents where id = $1', [id]);
+  if (check.rowCount === 0) {
+    reply.status(404);
+    return { error: 'agent not found' };
+  }
+  if (check.rows[0].sponsor_id !== sponsorId) {
+    reply.status(403);
+    return { error: 'sponsor_id does not match agent sponsor' };
+  }
+  const previousProfile = check.rows[0].throttle_profile;
+
+  // Update throttle profile
+  await pool.query(
+    `update agents set throttle_profile = $2::throttle_profile, updated_at = now() where id = $1`,
+    [id, profile],
+  );
+
+  const evt = await appendEvent(
+    'agent.throttle_profile_changed',
+    {
+      agent_id: id,
+      sponsor_id: sponsorId,
+      previous_profile: previousProfile,
+      new_profile: profile,
+    },
+    sponsorId,
+    correlationId,
+  );
+
+  // Audit the action
+  await auditSponsorAction(sponsorId, id, 'throttle_profile_changed', {
+    previous_profile: previousProfile,
+    new_profile: profile,
+  }, evt.event_id);
+
+  return { ok: true, throttle_profile: profile, event: evt };
+});
+
+// Sponsor power: Redeploy agent
+app.post('/sponsor/:sponsorId/agents/:id/redeploy', async (request, reply) => {
+  const { sponsorId, id } = request.params as { sponsorId: string; id: string };
+  const body = request.body as { deployment_target?: string };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Check agent exists and sponsor matches
+  const check = await pool.query('select sponsor_id, status, deployment_target from agents where id = $1', [id]);
+  if (check.rowCount === 0) {
+    reply.status(404);
+    return { error: 'agent not found' };
+  }
+  if (check.rows[0].sponsor_id !== sponsorId) {
+    reply.status(403);
+    return { error: 'sponsor_id does not match agent sponsor' };
+  }
+  const previousTarget = check.rows[0].deployment_target;
+
+  // Redeploy (reactivate and optionally change target)
+  await pool.query(
+    `update agents set status = 'active', deployment_target = coalesce($2, deployment_target), updated_at = now() where id = $1`,
+    [id, body.deployment_target ?? null],
+  );
+
+  const evt = await appendEvent(
+    'agent.sponsor_redeployed',
+    {
+      agent_id: id,
+      sponsor_id: sponsorId,
+      previous_deployment_target: previousTarget,
+      new_deployment_target: body.deployment_target ?? previousTarget,
+    },
+    sponsorId,
+    correlationId,
+  );
+
+  // Audit the action
+  await auditSponsorAction(sponsorId, id, 'redeployed', {
+    previous_deployment_target: previousTarget,
+    new_deployment_target: body.deployment_target ?? previousTarget,
+  }, evt.event_id);
+
+  return {
+    ok: true,
+    status: 'active',
+    deployment_target: body.deployment_target ?? previousTarget,
+    event: evt,
+  };
+});
+
+// Admin: View sponsor action audit log
+app.get('/admin/sponsors/:sponsorId/actions', async (request, reply) => {
+  // PLACEHOLDER AUTH: In production, use proper RBAC via @platform/shared
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+  const { sponsorId } = request.params as { sponsorId: string };
+  const query = request.query as { limit?: string };
+  const limit = Number(query.limit ?? 50);
+
+  const res = await pool.query(
+    `select id, agent_id, action_type, details_json, event_id, created_at
+     from sponsor_actions
+     where sponsor_id = $1
+     order by created_at desc
+     limit $2`,
+    [sponsorId, limit],
+  );
+  return { actions: res.rows };
+});
+
 // --- Outbox dispatcher ---
 
 setInterval(() => {

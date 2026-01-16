@@ -11,6 +11,18 @@ do $$ begin
 exception when duplicate_object then null;
 end $$;
 
+-- Cognition provider enum
+do $$ begin
+  create type cognition_provider as enum ('none', 'openai', 'anthropic', 'gemini');
+exception when duplicate_object then null;
+end $$;
+
+-- Throttle profile enum
+do $$ begin
+  create type throttle_profile as enum ('normal', 'conservative', 'aggressive', 'paused');
+exception when duplicate_object then null;
+end $$;
+
 -- Core agents table
 create table if not exists agents (
   id uuid primary key default gen_random_uuid(),
@@ -21,8 +33,25 @@ create table if not exists agents (
   updated_at timestamptz not null default now()
 );
 
+-- Add Foundry Control Plane columns (Phase 3)
+do $$ begin
+  alter table agents add column if not exists sponsor_id uuid;
+exception when others then null;
+end $$;
+
+do $$ begin
+  alter table agents add column if not exists cognition_provider cognition_provider not null default 'none';
+exception when others then null;
+end $$;
+
+do $$ begin
+  alter table agents add column if not exists throttle_profile throttle_profile not null default 'normal';
+exception when others then null;
+end $$;
+
 create index if not exists idx_agents_status on agents (status);
 create index if not exists idx_agents_handle on agents (handle) where handle is not null;
+create index if not exists idx_agents_sponsor on agents (sponsor_id) where sponsor_id is not null;
 
 -- Agent capacity (metabolism)
 create table if not exists agent_capacity (
@@ -105,6 +134,24 @@ create table if not exists events (
 create index if not exists idx_events_occurred_at on events (occurred_at);
 create index if not exists idx_events_actor_id on events (actor_id);
 create index if not exists idx_events_event_type on events (event_type);
+
+-- ============================================================================
+-- PHASE 3: Foundry Control Plane
+-- Sponsor actions audit log. All sponsor influence is indirect and audited.
+-- ============================================================================
+
+create table if not exists sponsor_actions (
+  id uuid primary key default gen_random_uuid(),
+  sponsor_id uuid not null,
+  agent_id uuid not null references agents(id) on delete cascade,
+  action_type text not null,
+  details_json jsonb not null,
+  event_id uuid,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_sponsor_actions_sponsor on sponsor_actions (sponsor_id, created_at desc);
+create index if not exists idx_sponsor_actions_agent on sponsor_actions (agent_id, created_at desc);
 `;
 
 async function run() {
