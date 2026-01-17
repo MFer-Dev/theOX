@@ -117,13 +117,24 @@ interface AgentEventPayload {
   [key: string]: unknown;
 }
 
-// Phase 6: Physics event payload
+// Phase 6: Physics event payload (matches ox-physics tick events)
+interface PhysicsState {
+  current_throughput_cap?: number;
+  current_throttle_factor?: number;
+  current_cognition_availability?: string;
+  current_burst_allowance?: number;
+  weather_state?: string;
+  active_regime_name?: string;
+  [key: string]: unknown;
+}
+
 interface PhysicsEventPayload {
   deployment_target: string;
-  regime_name?: string;
-  weather_state: string;
-  vars: Record<string, unknown>;
-  reason?: string;
+  previous_state?: PhysicsState;
+  new_state?: PhysicsState;
+  changes?: string[];
+  weather_event?: string | null;
+  weather_state?: string; // For weather-specific events
   [key: string]: unknown;
 }
 
@@ -949,6 +960,21 @@ const handlePhysicsEvent = async (event: EventEnvelope<PhysicsEventPayload>): Pr
   const deploymentTarget = payload.deployment_target;
   const eventTs = new Date(event.occurred_at);
 
+  // Extract state from physics event structure
+  // Physics events have new_state with weather_state, active_regime_name, etc.
+  const newState = payload.new_state ?? {};
+  const weatherState = newState.weather_state ?? payload.weather_state ?? 'clear';
+  const regimeName = newState.active_regime_name ?? null;
+  const reason = payload.weather_event ?? (payload.changes?.join(', ') ?? null);
+
+  // Build vars object from the full new_state
+  const vars: Record<string, unknown> = {
+    throughput_cap: newState.current_throughput_cap,
+    throttle_factor: newState.current_throttle_factor,
+    cognition_availability: newState.current_cognition_availability,
+    burst_allowance: newState.current_burst_allowance,
+  };
+
   // 1. Upsert current world state
   try {
     await pool.query(
@@ -963,9 +989,9 @@ const handlePhysicsEvent = async (event: EventEnvelope<PhysicsEventPayload>): Pr
          source_event_id = $6`,
       [
         deploymentTarget,
-        payload.regime_name ?? null,
-        payload.weather_state,
-        JSON.stringify(payload.vars ?? {}),
+        regimeName,
+        weatherState,
+        JSON.stringify(vars),
         eventTs,
         event.event_id,
       ],
@@ -984,10 +1010,10 @@ const handlePhysicsEvent = async (event: EventEnvelope<PhysicsEventPayload>): Pr
       [
         eventTs,
         deploymentTarget,
-        payload.regime_name ?? null,
-        payload.weather_state,
-        JSON.stringify(payload.vars ?? {}),
-        payload.reason ?? null,
+        regimeName,
+        weatherState,
+        JSON.stringify(vars),
+        reason,
         event.event_id,
       ],
     );
@@ -1005,10 +1031,6 @@ const handlePhysicsEvent = async (event: EventEnvelope<PhysicsEventPayload>): Pr
          count(*) filter (where type = 'agent.action_accepted') as accepted,
          count(*) filter (where type = 'agent.action_rejected') as rejected,
          count(distinct session_id) filter (where session_id is not null) as sessions,
-         jsonb_object_agg(
-           coalesce(summary_json->>'cognition_provider', 'none'),
-           count(*)
-         ) filter (where summary_json->>'cognition_provider' is not null) as providers,
          avg((summary_json->>'cost')::numeric) filter (where summary_json->>'cost' is not null) as avg_cost
        from ox_live_events
        where deployment_target = $1
@@ -1016,6 +1038,25 @@ const handlePhysicsEvent = async (event: EventEnvelope<PhysicsEventPayload>): Pr
          and ts < $2 + interval '5 minutes'`,
       [deploymentTarget, bucketStart],
     );
+
+    // Get provider counts separately to avoid nested aggregates
+    const providersRes = await pool.query(
+      `select
+         coalesce(summary_json->>'cognition_provider', 'none') as provider,
+         count(*) as count
+       from ox_live_events
+       where deployment_target = $1
+         and ts >= $2
+         and ts < $2 + interval '5 minutes'
+         and summary_json->>'cognition_provider' is not null
+       group by summary_json->>'cognition_provider'`,
+      [deploymentTarget, bucketStart],
+    );
+
+    const providerCounts: Record<string, number> = {};
+    for (const row of providersRes.rows) {
+      providerCounts[row.provider] = Number(row.count);
+    }
 
     const stats = statsRes.rows[0] ?? {};
 
@@ -1047,7 +1088,7 @@ const handlePhysicsEvent = async (event: EventEnvelope<PhysicsEventPayload>): Pr
         Number(stats.rejected ?? 0),
         Number(stats.sessions ?? 0),
         Number(artifactRes.rows[0]?.count ?? 0),
-        JSON.stringify(stats.providers ?? {}),
+        JSON.stringify(providerCounts),
         stats.avg_cost ?? null,
       ],
     );
@@ -1261,11 +1302,11 @@ const startConsumer = async () => {
     // Consumer for physics events (Phase 6)
     await runConsumer({
       groupId: 'ox-read-physics-materializer',
-      topics: ['events.ox_physics.v1'],
+      topics: ['events.ox-physics.v1'],
       handler: handlePhysicsEvent,
       dlq: true,
     });
-    app.log.info('OX Read consumer started for events.ox_physics.v1');
+    app.log.info('OX Read consumer started for events.ox-physics.v1');
 
     consumerInitialized = true;
   } catch (err) {
