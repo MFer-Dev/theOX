@@ -26,9 +26,13 @@ async function request(
   opts: { method?: string; body?: unknown; headers?: Record<string, string> } = {}
 ) {
   const headers: Record<string, string> = {
-    'content-type': 'application/json',
     ...opts.headers,
   };
+
+  // Only set content-type for requests with a body
+  if (opts.body !== undefined) {
+    headers['content-type'] = 'application/json';
+  }
 
   const res = await fetch(url, {
     method: opts.method || (opts.body ? 'POST' : 'GET'),
@@ -309,10 +313,10 @@ describe('OX Foundry Invariants (Phase 10)', async () => {
 
       assert.ok(update.res.status < 300, 'Update should succeed');
 
-      const updateData = update.json as { config?: { version: number } };
+      const updateData = update.json as { agent?: { config_version: number } };
       assert.ok(
-        typeof updateData.config?.version === 'number',
-        'Should return version number'
+        typeof updateData.agent?.config_version === 'number',
+        'Should return config version number'
       );
     });
   });

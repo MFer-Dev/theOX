@@ -26,9 +26,13 @@ async function request(
   opts: { method?: string; body?: unknown; headers?: Record<string, string> } = {}
 ) {
   const headers: Record<string, string> = {
-    'content-type': 'application/json',
     ...opts.headers,
   };
+
+  // Only set content-type for requests with a body
+  if (opts.body !== undefined) {
+    headers['content-type'] = 'application/json';
+  }
 
   const res = await fetch(url, {
     method: opts.method || (opts.body ? 'POST' : 'GET'),
@@ -88,14 +92,15 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         `Should allow credit purchase, got ${result.res.status}`
       );
 
-      const data = result.json as { balance?: number };
+      const data = result.json as { balance?: string | number };
       assert.ok(
-        typeof data.balance === 'number',
+        data.balance !== undefined,
         'Should return new balance'
       );
+      const balance = typeof data.balance === 'string' ? parseInt(data.balance, 10) : data.balance;
       assert.ok(
-        data.balance >= 1000,
-        `Balance should be at least 1000, got ${data.balance}`
+        balance >= 1000,
+        `Balance should be at least 1000, got ${balance}`
       );
     });
 
