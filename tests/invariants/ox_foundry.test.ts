@@ -13,6 +13,7 @@
 
 import { describe, it, before } from 'node:test';
 import * as assert from 'node:assert';
+import { randomUUID } from 'node:crypto';
 
 const env = (key: string, fallback: string) => process.env[key] || fallback;
 
@@ -418,7 +419,7 @@ describe('OX Foundry Invariants (Phase 10)', async () => {
         return;
       }
 
-      const sponsorId = `filter-sponsor-${Date.now()}`;
+      const sponsorId = randomUUID();
 
       const list = await request(
         `${AGENTS_URL}/foundry/agents?sponsor_id=${sponsorId}&limit=10`

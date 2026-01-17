@@ -13,6 +13,7 @@
 
 import { describe, it, before } from 'node:test';
 import * as assert from 'node:assert';
+import { randomUUID } from 'node:crypto';
 
 const env = (key: string, fallback: string) => process.env[key] || fallback;
 
@@ -76,7 +77,7 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         return;
       }
 
-      const sponsorId = `purchase-test-${Date.now()}`;
+      const sponsorId = randomUUID();
 
       const result = await request(`${AGENTS_URL}/sponsor/${sponsorId}/credits/purchase`, {
         body: { amount: 1000 },
@@ -104,7 +105,7 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         return;
       }
 
-      const sponsorId = `purchase-test-${Date.now()}`;
+      const sponsorId = randomUUID();
 
       const zeroResult = await request(`${AGENTS_URL}/sponsor/${sponsorId}/credits/purchase`, {
         body: { amount: 0 },
@@ -135,7 +136,7 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         return;
       }
 
-      const sponsorId = `wallet-test-${Date.now()}`;
+      const sponsorId = randomUUID();
 
       // Get wallet (even if empty)
       const wallet = await request(`${AGENTS_URL}/sponsor/${sponsorId}/credits`);
@@ -155,7 +156,7 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         return;
       }
 
-      const sponsorId = `history-test-${Date.now()}`;
+      const sponsorId = randomUUID();
 
       // Purchase credits
       await request(`${AGENTS_URL}/sponsor/${sponsorId}/credits/purchase`, {
@@ -180,8 +181,8 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         return;
       }
 
-      const sponsorId = `alloc-test-${Date.now()}`;
-      const agentId = `agent-${Date.now()}`;
+      const sponsorId = randomUUID();
+      const agentId = randomUUID();
 
       // Purchase small amount
       await request(`${AGENTS_URL}/sponsor/${sponsorId}/credits/purchase`, {
@@ -207,8 +208,8 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         return;
       }
 
-      const sponsorId = `alloc-test-${Date.now()}`;
-      const agentId = `agent-${Date.now()}`;
+      const sponsorId = randomUUID();
+      const agentId = randomUUID();
 
       const result = await request(
         `${AGENTS_URL}/sponsor/${sponsorId}/agents/${agentId}/credits/allocate`,
@@ -230,7 +231,7 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         return;
       }
 
-      const agentId = `balance-test-${Date.now()}`;
+      const agentId = randomUUID();
 
       // Get agent credits (even if doesn't exist)
       const credits = await request(`${AGENTS_URL}/agents/${agentId}/credits`);
@@ -253,7 +254,7 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         return;
       }
 
-      const agentId = `request-test-${Date.now()}`;
+      const agentId = randomUUID();
 
       const result = await request(`${AGENTS_URL}/agents/${agentId}/attempt`, {
         body: {
@@ -285,7 +286,7 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         return;
       }
 
-      const agentId = `projection-test-${Date.now()}`;
+      const agentId = randomUUID();
 
       const result = await request(
         `${OX_READ_URL}/ox/agents/${agentId}/credits`,
@@ -305,7 +306,7 @@ describe('OX Economy Invariants (Phase 9)', async () => {
         return;
       }
 
-      const sponsorId = `audit-test-${Date.now()}`;
+      const sponsorId = randomUUID();
 
       // With auditor role
       const withRole = await request(
@@ -347,7 +348,7 @@ describe('OX Economy Invariants (Phase 9)', async () => {
       }
 
       // This invariant is structural - verify the rejection reason
-      const agentId = `debt-test-${Date.now()}`;
+      const agentId = randomUUID();
 
       const result = await request(`${AGENTS_URL}/agents/${agentId}/attempt`, {
         body: {

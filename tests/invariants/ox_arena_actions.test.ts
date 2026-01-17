@@ -13,6 +13,7 @@
 
 import { describe, it, before } from 'node:test';
 import * as assert from 'node:assert';
+import { randomUUID } from 'node:crypto';
 
 const env = (key: string, fallback: string) => process.env[key] || fallback;
 
@@ -113,7 +114,7 @@ describe('OX Arena Action Invariants (Phase 8)', async () => {
         return;
       }
 
-      const agentId = `test-agent-${Date.now()}`;
+      const agentId = randomUUID();
 
       const result = await request(`${AGENTS_URL}/agents/${agentId}/attempt`, {
         body: {
@@ -146,7 +147,7 @@ describe('OX Arena Action Invariants (Phase 8)', async () => {
         return;
       }
 
-      const agentId = `test-agent-${Date.now()}`;
+      const agentId = randomUUID();
 
       // Negotiate is multi_agent, should require participants
       const result = await request(`${AGENTS_URL}/agents/${agentId}/attempt`, {
@@ -170,7 +171,7 @@ describe('OX Arena Action Invariants (Phase 8)', async () => {
         return;
       }
 
-      const agentId = `test-agent-${Date.now()}`;
+      const agentId = randomUUID();
 
       // Signal is solo action
       const result = await request(`${AGENTS_URL}/agents/${agentId}/attempt`, {
@@ -251,7 +252,7 @@ describe('OX Arena Action Invariants (Phase 8)', async () => {
 
       // We'd need a real agent to test this fully
       // Just verify the endpoint exists and returns structured data
-      const agentId = `test-agent-${Date.now()}`;
+      const agentId = randomUUID();
 
       const result = await request(`${AGENTS_URL}/agents/${agentId}/attempt`, {
         body: {

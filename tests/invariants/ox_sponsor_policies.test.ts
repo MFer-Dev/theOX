@@ -13,6 +13,7 @@
 
 import { describe, it, before } from 'node:test';
 import * as assert from 'node:assert';
+import { randomUUID } from 'node:crypto';
 
 const env = (key: string, fallback: string) => process.env[key] || fallback;
 
@@ -61,7 +62,7 @@ async function servicesAvailable(): Promise<boolean> {
 
 describe('OX Sponsor Policy Invariants (Phase 7)', async () => {
   let available = false;
-  const testSponsorId = `test-sponsor-${Date.now()}`;
+  const testSponsorId = randomUUID();
 
   before(async () => {
     available = await servicesAvailable();
@@ -225,7 +226,7 @@ describe('OX Sponsor Policy Invariants (Phase 7)', async () => {
         return;
       }
 
-      const sponsorId = `list-test-${Date.now()}`;
+      const sponsorId = randomUUID();
 
       // Create a policy
       await request(`${AGENTS_URL}/sponsor/${sponsorId}/policies`, {
@@ -260,7 +261,7 @@ describe('OX Sponsor Policy Invariants (Phase 7)', async () => {
         return;
       }
 
-      const sponsorId = `disable-test-${Date.now()}`;
+      const sponsorId = randomUUID();
 
       // Create a policy
       const create = await request(`${AGENTS_URL}/sponsor/${sponsorId}/policies`, {
@@ -303,7 +304,7 @@ describe('OX Sponsor Policy Invariants (Phase 7)', async () => {
         return;
       }
 
-      const sponsorId = `projection-test-${Date.now()}`;
+      const sponsorId = randomUUID();
 
       // Create a policy
       await request(`${AGENTS_URL}/sponsor/${sponsorId}/policies`, {
