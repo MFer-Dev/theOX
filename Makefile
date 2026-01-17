@@ -1,7 +1,7 @@
 # theOX Monorepo Makefile
 # Run `make help` for available targets
 
-.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world
+.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10
 
 # Default target
 help:
@@ -39,8 +39,13 @@ help:
 	@echo "  make test-physics-invariants Run OX Physics invariant tests"
 	@echo "  make test-world-invariants   Run OX World State invariant tests"
 	@echo "  make test-replay-invariants  Run OX Replay Harness invariant tests"
+	@echo "  make test-sponsor-policies   Run sponsor policy tests"
+	@echo "  make test-arena-actions      Run arena action tests"
+	@echo "  make test-economy            Run economy tests"
+	@echo "  make test-foundry            Run Foundry tests"
 	@echo "  make seed-physics            Seed physics with storm regime"
 	@echo "  make smoke-world             Smoke test world state endpoints"
+	@echo "  make smoke-phase7-10         Smoke test Phase 7-10 features"
 
 # ============================================================================
 # SETUP
@@ -217,3 +222,52 @@ smoke-world:
 	curl -s http://localhost:4018/ox/world/ox-sandbox/effects \
 		-H "x-observer-id: smoke-test" \
 		-H "x-observer-role: analyst" | jq .
+
+# ============================================================================
+# PHASE 7-10 TESTS
+# ============================================================================
+
+test-sponsor-policies:
+	@echo "Running sponsor policy invariant tests..."
+	pnpm exec tsx --test tests/invariants/ox_sponsor_policies.test.ts
+
+test-arena-actions:
+	@echo "Running arena action invariant tests..."
+	pnpm exec tsx --test tests/invariants/ox_arena_actions.test.ts
+
+test-economy:
+	@echo "Running economy invariant tests..."
+	pnpm exec tsx --test tests/invariants/ox_economy.test.ts
+
+test-foundry:
+	@echo "Running Foundry invariant tests..."
+	pnpm exec tsx --test tests/invariants/ox_foundry.test.ts
+
+smoke-phase7-10:
+	@echo "Smoke testing Phase 7-10 features..."
+	@echo "=== Creating test sponsor and agent ==="
+	$(eval SPONSOR_ID := $(shell uuidgen | tr '[:upper:]' '[:lower:]'))
+	@echo "Sponsor ID: $(SPONSOR_ID)"
+	@echo ""
+	@echo "--- Purchasing credits ---"
+	curl -s -X POST http://localhost:4017/sponsor/$(SPONSOR_ID)/credits/purchase \
+		-H "Content-Type: application/json" \
+		-d '{"amount": 1000}' | jq .
+	@echo ""
+	@echo "--- Creating agent via Foundry ---"
+	curl -s -X POST http://localhost:4017/foundry/agents \
+		-H "Content-Type: application/json" \
+		-d '{"handle": "smoke-agent", "deployment_target": "ox-lab", "sponsor_id": "$(SPONSOR_ID)", "config": {"cognition_provider": "none"}}' | jq .
+	@echo ""
+	@echo "--- Creating sponsor policy ---"
+	curl -s -X POST http://localhost:4017/sponsor/$(SPONSOR_ID)/policies \
+		-H "Content-Type: application/json" \
+		-d '{"policy_type": "capacity", "cadence_seconds": 60, "rules": [{"if": [{"field": "env.weather_state", "op": "eq", "value": "stormy"}], "then": {"action": "allocate_delta", "params": {"delta": 10}}}]}' | jq .
+	@echo ""
+	@echo "--- Listing sponsor policies ---"
+	curl -s http://localhost:4017/sponsor/$(SPONSOR_ID)/policies | jq .
+	@echo ""
+	@echo "--- Listing Foundry agents ---"
+	curl -s http://localhost:4017/foundry/agents?limit=5 | jq .
+	@echo ""
+	@echo "=== Phase 7-10 smoke test complete ==="

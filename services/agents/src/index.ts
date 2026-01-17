@@ -1485,6 +1485,1137 @@ setInterval(() => {
   dispatchOutbox(pool, async (topic, payload) => publishEvent(topic, payload));
 }, 10000);
 
+// ============================================================================
+// PHASE 7: Sponsor Sweep Policies (curling sweep layer)
+// ============================================================================
+
+const POLICY_TYPES = ['capacity', 'cognition', 'throttle', 'redeploy'] as const;
+type PolicyType = (typeof POLICY_TYPES)[number];
+
+interface PolicyRule {
+  if: Array<{
+    field: string;
+    op: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'not_in';
+    value: unknown;
+  }>;
+  then: {
+    action: string;
+    params: Record<string, unknown>;
+  };
+}
+
+interface SponsorPolicy {
+  id: string;
+  sponsor_id: string;
+  policy_type: PolicyType;
+  rules_json: PolicyRule[];
+  cadence_seconds: number;
+  active: boolean;
+  created_at: Date;
+  updated_at: Date;
+}
+
+/**
+ * Evaluate a policy predicate against context.
+ */
+const evaluatePredicate = (
+  predicate: PolicyRule['if'][0],
+  context: Record<string, unknown>,
+): boolean => {
+  const parts = predicate.field.split('.');
+  let value: unknown = context;
+  for (const part of parts) {
+    if (value && typeof value === 'object') {
+      value = (value as Record<string, unknown>)[part];
+    } else {
+      value = undefined;
+      break;
+    }
+  }
+
+  switch (predicate.op) {
+    case 'eq':
+      return value === predicate.value;
+    case 'neq':
+      return value !== predicate.value;
+    case 'gt':
+      return typeof value === 'number' && value > (predicate.value as number);
+    case 'gte':
+      return typeof value === 'number' && value >= (predicate.value as number);
+    case 'lt':
+      return typeof value === 'number' && value < (predicate.value as number);
+    case 'lte':
+      return typeof value === 'number' && value <= (predicate.value as number);
+    case 'in':
+      return Array.isArray(predicate.value) && predicate.value.includes(value);
+    case 'not_in':
+      return Array.isArray(predicate.value) && !predicate.value.includes(value);
+    default:
+      return false;
+  }
+};
+
+/**
+ * Evaluate all rules in a policy against context.
+ * Returns the first matching rule's action or null.
+ */
+const evaluatePolicy = (
+  rules: PolicyRule[],
+  context: Record<string, unknown>,
+): PolicyRule['then'] | null => {
+  for (const rule of rules) {
+    const allMatch = rule.if.every((pred) => evaluatePredicate(pred, context));
+    if (allMatch) {
+      return rule.then;
+    }
+  }
+  return null;
+};
+
+/**
+ * Apply a policy action to an agent.
+ */
+const applyPolicyAction = async (
+  policy: SponsorPolicy,
+  agentId: string,
+  action: PolicyRule['then'],
+  tickId: string,
+  correlationId: string,
+): Promise<{ applied: boolean; reason: string; diff: Record<string, unknown> }> => {
+  const diff: Record<string, unknown> = {};
+
+  switch (policy.policy_type) {
+    case 'capacity': {
+      if (action.action !== 'allocate_delta') {
+        return { applied: false, reason: 'invalid_action_for_policy_type', diff };
+      }
+      const delta = Number(action.params.delta ?? 0);
+      if (delta === 0) {
+        return { applied: false, reason: 'delta_is_zero', diff };
+      }
+
+      // Get current capacity
+      const capRes = await pool.query(
+        `select balance, max_balance from agent_capacity where agent_id = $1 for update`,
+        [agentId],
+      );
+      if (capRes.rowCount === 0) {
+        return { applied: false, reason: 'agent_capacity_not_found', diff };
+      }
+
+      const { balance, max_balance } = capRes.rows[0];
+      const newBalance = Math.max(0, Math.min(balance + delta, max_balance));
+
+      if (newBalance === balance) {
+        return { applied: false, reason: 'no_change_within_bounds', diff };
+      }
+
+      await pool.query(
+        `update agent_capacity set balance = $2, last_reconciled_at = now() where agent_id = $1`,
+        [agentId, newBalance],
+      );
+
+      diff.previous_balance = balance;
+      diff.new_balance = newBalance;
+      diff.delta = delta;
+      break;
+    }
+
+    case 'cognition': {
+      if (action.action !== 'set_provider') {
+        return { applied: false, reason: 'invalid_action_for_policy_type', diff };
+      }
+      const provider = String(action.params.provider ?? 'none');
+      if (!COGNITION_PROVIDERS.includes(provider as CognitionProvider)) {
+        return { applied: false, reason: 'invalid_provider', diff };
+      }
+
+      const prevRes = await pool.query(
+        `select cognition_provider from agents where id = $1`,
+        [agentId],
+      );
+      const previousProvider = prevRes.rows[0]?.cognition_provider;
+
+      if (previousProvider === provider) {
+        return { applied: false, reason: 'provider_unchanged', diff };
+      }
+
+      await pool.query(
+        `update agents set cognition_provider = $2::cognition_provider, updated_at = now() where id = $1`,
+        [agentId, provider],
+      );
+
+      diff.previous_provider = previousProvider;
+      diff.new_provider = provider;
+      break;
+    }
+
+    case 'throttle': {
+      if (action.action !== 'set_profile') {
+        return { applied: false, reason: 'invalid_action_for_policy_type', diff };
+      }
+      const profile = String(action.params.profile ?? 'normal');
+      if (!THROTTLE_PROFILES.includes(profile as ThrottleProfile)) {
+        return { applied: false, reason: 'invalid_profile', diff };
+      }
+
+      const prevRes = await pool.query(
+        `select throttle_profile from agents where id = $1`,
+        [agentId],
+      );
+      const previousProfile = prevRes.rows[0]?.throttle_profile;
+
+      if (previousProfile === profile) {
+        return { applied: false, reason: 'profile_unchanged', diff };
+      }
+
+      await pool.query(
+        `update agents set throttle_profile = $2::throttle_profile, updated_at = now() where id = $1`,
+        [agentId, profile],
+      );
+
+      diff.previous_profile = previousProfile;
+      diff.new_profile = profile;
+      break;
+    }
+
+    case 'redeploy': {
+      if (action.action !== 'redeploy') {
+        return { applied: false, reason: 'invalid_action_for_policy_type', diff };
+      }
+      const target = String(action.params.deployment_target ?? '');
+      if (!target) {
+        return { applied: false, reason: 'deployment_target_required', diff };
+      }
+
+      // Check environment allows this target
+      const envRes = await pool.query(
+        `select cognition_availability from environment_states where deployment_target = $1`,
+        [target],
+      );
+      if (envRes.rowCount && envRes.rowCount > 0 && envRes.rows[0].cognition_availability === 'unavailable') {
+        return { applied: false, reason: 'target_environment_unavailable', diff };
+      }
+
+      const prevRes = await pool.query(
+        `select deployment_target from agents where id = $1`,
+        [agentId],
+      );
+      const previousTarget = prevRes.rows[0]?.deployment_target;
+
+      await pool.query(
+        `update agents set deployment_target = $2, status = 'active', updated_at = now() where id = $1`,
+        [agentId, target],
+      );
+
+      diff.previous_target = previousTarget;
+      diff.new_target = target;
+      break;
+    }
+  }
+
+  // Emit policy applied event
+  await appendEvent(
+    'agent.sponsor_policy_applied',
+    {
+      policy_id: policy.id,
+      sponsor_id: policy.sponsor_id,
+      agent_id: agentId,
+      policy_type: policy.policy_type,
+      action: action.action,
+      params: action.params,
+      diff,
+      source_tick_id: tickId,
+    },
+    policy.sponsor_id,
+    correlationId,
+  );
+
+  return { applied: true, reason: 'policy_applied', diff };
+};
+
+/**
+ * Policy runner: executes policies on cadence.
+ */
+const runPolicyTick = async (): Promise<void> => {
+  const tickId = crypto.randomUUID();
+  const correlationId = `policy-tick-${tickId}`;
+  const now = new Date();
+
+  // Find policies due for execution
+  const policiesRes = await pool.query(`
+    select p.*,
+           coalesce(max(r.ran_at), p.created_at) as last_run
+    from sponsor_policies p
+    left join sponsor_policy_runs r on r.policy_id = p.id
+    where p.active = true
+    group by p.id
+    having (extract(epoch from now() - coalesce(max(r.ran_at), p.created_at))) >= p.cadence_seconds
+  `);
+
+  for (const policyRow of policiesRes.rows) {
+    const policy = policyRow as SponsorPolicy & { last_run: Date };
+
+    try {
+      // Get agents sponsored by this sponsor
+      const agentsRes = await pool.query(
+        `select a.id, a.status, a.deployment_target, a.cognition_provider, a.throttle_profile,
+                c.balance, c.max_balance
+         from agents a
+         left join agent_capacity c on c.agent_id = a.id
+         where a.sponsor_id = $1 and a.status = 'active'`,
+        [policy.sponsor_id],
+      );
+
+      for (const agent of agentsRes.rows) {
+        // Build context for rule evaluation
+        const envRes = await pool.query(
+          `select * from environment_states where deployment_target = $1`,
+          [agent.deployment_target ?? 'default'],
+        );
+        const envState = envRes.rows[0] ?? {
+          cognition_availability: 'full',
+          throttle_factor: 1.0,
+          weather_state: 'clear',
+        };
+
+        const context = {
+          agent: {
+            id: agent.id,
+            status: agent.status,
+            deployment_target: agent.deployment_target,
+            cognition_provider: agent.cognition_provider,
+            throttle_profile: agent.throttle_profile,
+            remaining_balance: agent.balance,
+            max_balance: agent.max_balance,
+          },
+          env: {
+            cognition_availability: envState.cognition_availability,
+            throttle_factor: envState.throttle_factor,
+            weather_state: envState.weather_state ?? 'clear',
+          },
+        };
+
+        // Evaluate policy rules
+        const rules = Array.isArray(policy.rules_json) ? policy.rules_json : [];
+        const action = evaluatePolicy(rules, context);
+
+        if (action) {
+          // Check idempotency
+          const existingRun = await pool.query(
+            `select id from sponsor_policy_runs where policy_id = $1 and source_tick_id = $2`,
+            [policy.id, tickId],
+          );
+          if (existingRun.rowCount && existingRun.rowCount > 0) {
+            continue; // Already processed this tick
+          }
+
+          const result = await applyPolicyAction(policy, agent.id, action, tickId, correlationId);
+
+          // Record policy run
+          await pool.query(
+            `insert into sponsor_policy_runs (policy_id, ran_at, outcome_json, applied, reason, source_tick_id)
+             values ($1, $2, $3, $4, $5, $6)
+             on conflict (policy_id, source_tick_id) do nothing`,
+            [policy.id, now, JSON.stringify({ agent_id: agent.id, action, result }), result.applied, result.reason, tickId],
+          );
+
+          if (!result.applied) {
+            // Emit skipped event
+            await appendEvent(
+              'agent.sponsor_policy_skipped',
+              {
+                policy_id: policy.id,
+                sponsor_id: policy.sponsor_id,
+                agent_id: agent.id,
+                policy_type: policy.policy_type,
+                reason: result.reason,
+                source_tick_id: tickId,
+              },
+              policy.sponsor_id,
+              correlationId,
+            );
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`Policy ${policy.id} execution error:`, err);
+    }
+  }
+};
+
+// Policy runner interval (60 seconds)
+setInterval(() => {
+  runPolicyTick().catch((err) => console.error('Policy tick error:', err));
+}, 60000);
+
+// --- Phase 7: Sponsor Policy APIs ---
+
+app.post('/sponsor/:sponsorId/policies', async (request, reply) => {
+  const { sponsorId } = request.params as { sponsorId: string };
+  const body = request.body as {
+    policy_type: string;
+    rules: PolicyRule[];
+    cadence_seconds: number;
+  };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+  const idempotencyKey = request.headers['x-idempotency-key'] as string | undefined;
+
+  // Validate policy_type
+  const policyType = String(body.policy_type ?? '').toLowerCase().trim() as PolicyType;
+  if (!POLICY_TYPES.includes(policyType)) {
+    reply.status(400);
+    return { error: 'invalid policy_type', valid_types: POLICY_TYPES };
+  }
+
+  // Validate cadence
+  const cadence = Number(body.cadence_seconds ?? 0);
+  if (cadence < 60) {
+    reply.status(400);
+    return { error: 'cadence_seconds must be at least 60' };
+  }
+
+  // Validate rules
+  if (!Array.isArray(body.rules) || body.rules.length === 0) {
+    reply.status(400);
+    return { error: 'rules must be a non-empty array' };
+  }
+
+  const result = await withIdempotency(pool, idempotencyKey, async () => {
+    const res = await pool.query(
+      `insert into sponsor_policies (sponsor_id, policy_type, rules_json, cadence_seconds)
+       values ($1, $2::sponsor_policy_type, $3, $4)
+       returning *`,
+      [sponsorId, policyType, JSON.stringify(body.rules), cadence],
+    );
+
+    const policy = res.rows[0];
+
+    const evt = await appendEvent(
+      'sponsor.policy_created',
+      {
+        policy_id: policy.id,
+        sponsor_id: sponsorId,
+        policy_type: policyType,
+        cadence_seconds: cadence,
+      },
+      sponsorId,
+      correlationId,
+      idempotencyKey,
+    );
+
+    return { policy, event: evt };
+  });
+
+  reply.status(201);
+  return result;
+});
+
+app.get('/sponsor/:sponsorId/policies', async (request) => {
+  const { sponsorId } = request.params as { sponsorId: string };
+  const query = request.query as { active?: string };
+
+  const activeFilter = query.active === 'false' ? false : query.active === 'true' ? true : null;
+
+  const res = await pool.query(
+    `select * from sponsor_policies
+     where sponsor_id = $1 ${activeFilter !== null ? 'and active = $2' : ''}
+     order by created_at desc`,
+    activeFilter !== null ? [sponsorId, activeFilter] : [sponsorId],
+  );
+
+  return { policies: res.rows };
+});
+
+app.put('/sponsor/:sponsorId/policies/:policyId', async (request, reply) => {
+  const { sponsorId, policyId } = request.params as { sponsorId: string; policyId: string };
+  const body = request.body as {
+    rules?: PolicyRule[];
+    cadence_seconds?: number;
+  };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Check policy exists and belongs to sponsor
+  const check = await pool.query(
+    `select * from sponsor_policies where id = $1 and sponsor_id = $2`,
+    [policyId, sponsorId],
+  );
+  if (check.rowCount === 0) {
+    reply.status(404);
+    return { error: 'policy not found' };
+  }
+
+  const updates: string[] = [];
+  const values: unknown[] = [policyId];
+  let paramIndex = 2;
+
+  if (body.rules) {
+    updates.push(`rules_json = $${paramIndex++}`);
+    values.push(JSON.stringify(body.rules));
+  }
+  if (body.cadence_seconds !== undefined) {
+    if (body.cadence_seconds < 60) {
+      reply.status(400);
+      return { error: 'cadence_seconds must be at least 60' };
+    }
+    updates.push(`cadence_seconds = $${paramIndex++}`);
+    values.push(body.cadence_seconds);
+  }
+
+  if (updates.length === 0) {
+    return { policy: check.rows[0] };
+  }
+
+  updates.push('updated_at = now()');
+
+  const res = await pool.query(
+    `update sponsor_policies set ${updates.join(', ')} where id = $1 returning *`,
+    values,
+  );
+
+  await appendEvent(
+    'sponsor.policy_updated',
+    {
+      policy_id: policyId,
+      sponsor_id: sponsorId,
+      changes: body,
+    },
+    sponsorId,
+    correlationId,
+  );
+
+  return { policy: res.rows[0] };
+});
+
+app.post('/sponsor/:sponsorId/policies/:policyId/disable', async (request, reply) => {
+  const { sponsorId, policyId } = request.params as { sponsorId: string; policyId: string };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  const check = await pool.query(
+    `select * from sponsor_policies where id = $1 and sponsor_id = $2`,
+    [policyId, sponsorId],
+  );
+  if (check.rowCount === 0) {
+    reply.status(404);
+    return { error: 'policy not found' };
+  }
+
+  await pool.query(
+    `update sponsor_policies set active = false, updated_at = now() where id = $1`,
+    [policyId],
+  );
+
+  await appendEvent(
+    'sponsor.policy_disabled',
+    {
+      policy_id: policyId,
+      sponsor_id: sponsorId,
+    },
+    sponsorId,
+    correlationId,
+  );
+
+  return { ok: true, policy_id: policyId, active: false };
+});
+
+app.get('/admin/sponsors/:sponsorId/policy-runs', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+  const { sponsorId } = request.params as { sponsorId: string };
+  const query = request.query as { limit?: string };
+  const limit = Number(query.limit ?? 50);
+
+  const res = await pool.query(
+    `select r.*, p.policy_type, p.sponsor_id
+     from sponsor_policy_runs r
+     join sponsor_policies p on p.id = r.policy_id
+     where p.sponsor_id = $1
+     order by r.ran_at desc
+     limit $2`,
+    [sponsorId, limit],
+  );
+
+  return { runs: res.rows };
+});
+
+// ============================================================================
+// PHASE 9: Closed-Loop Economy v1 (Credits)
+// ============================================================================
+
+// Sponsor credits: Purchase (stub - no payment integration)
+app.post('/sponsor/:sponsorId/credits/purchase', async (request, reply) => {
+  const { sponsorId } = request.params as { sponsorId: string };
+  const body = request.body as { amount: number };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+  const idempotencyKey = request.headers['x-idempotency-key'] as string | undefined;
+
+  const amount = Number(body.amount ?? 0);
+  if (amount <= 0) {
+    reply.status(400);
+    return { error: 'amount must be positive' };
+  }
+
+  const result = await withIdempotency(pool, idempotencyKey, async () => {
+    // Upsert sponsor wallet
+    await pool.query(
+      `insert into sponsor_wallets (sponsor_id, balance, updated_at)
+       values ($1, $2, now())
+       on conflict (sponsor_id)
+       do update set balance = sponsor_wallets.balance + $2, updated_at = now()`,
+      [sponsorId, amount],
+    );
+
+    // Record treasury entry
+    await pool.query(
+      `insert into treasury_ledger (type, amount, actor, memo)
+       values ('mint', $1, 'system', $2)`,
+      [amount, `Purchase stub for sponsor ${sponsorId}`],
+    );
+
+    // Record credit transaction
+    await pool.query(
+      `insert into credit_transactions (sponsor_id, type, amount, idempotency_key)
+       values ($1, 'purchase_stub', $2, $3)`,
+      [sponsorId, amount, idempotencyKey ?? null],
+    );
+
+    // Get updated balance
+    const walletRes = await pool.query(
+      `select balance from sponsor_wallets where sponsor_id = $1`,
+      [sponsorId],
+    );
+
+    const evt = await appendEvent(
+      'sponsor.credits_purchased',
+      {
+        sponsor_id: sponsorId,
+        amount,
+        new_balance: walletRes.rows[0].balance,
+      },
+      sponsorId,
+      correlationId,
+      idempotencyKey,
+    );
+
+    return { balance: walletRes.rows[0].balance, purchased: amount, event: evt };
+  });
+
+  reply.status(201);
+  return result;
+});
+
+// Sponsor credits: Allocate to agent
+app.post('/sponsor/:sponsorId/agents/:agentId/credits/allocate', async (request, reply) => {
+  const { sponsorId, agentId } = request.params as { sponsorId: string; agentId: string };
+  const body = request.body as { amount: number };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+  const idempotencyKey = request.headers['x-idempotency-key'] as string | undefined;
+
+  const amount = Number(body.amount ?? 0);
+  if (amount <= 0) {
+    reply.status(400);
+    return { error: 'amount must be positive' };
+  }
+
+  // Check agent exists and is sponsored by this sponsor
+  const agentCheck = await pool.query(
+    `select sponsor_id from agents where id = $1`,
+    [agentId],
+  );
+  if (agentCheck.rowCount === 0) {
+    reply.status(404);
+    return { error: 'agent not found' };
+  }
+  if (agentCheck.rows[0].sponsor_id !== sponsorId) {
+    reply.status(403);
+    return { error: 'agent not sponsored by this sponsor' };
+  }
+
+  // Check sponsor wallet balance
+  const walletRes = await pool.query(
+    `select balance from sponsor_wallets where sponsor_id = $1 for update`,
+    [sponsorId],
+  );
+  if (walletRes.rowCount === 0 || walletRes.rows[0].balance < amount) {
+    reply.status(400);
+    return { error: 'sponsor_credit_insufficient', required: amount, available: walletRes.rows[0]?.balance ?? 0 };
+  }
+
+  const result = await withIdempotency(pool, idempotencyKey, async () => {
+    // Deduct from sponsor wallet
+    await pool.query(
+      `update sponsor_wallets set balance = balance - $2, updated_at = now() where sponsor_id = $1`,
+      [sponsorId, amount],
+    );
+
+    // Add to agent credit balance
+    await pool.query(
+      `insert into agent_credit_balance (agent_id, balance, updated_at)
+       values ($1, $2, now())
+       on conflict (agent_id)
+       do update set balance = agent_credit_balance.balance + $2, updated_at = now()`,
+      [agentId, amount],
+    );
+
+    // Record credit transaction
+    await pool.query(
+      `insert into credit_transactions (sponsor_id, agent_id, type, amount, idempotency_key)
+       values ($1, $2, 'allocate_to_agent', $3, $4)`,
+      [sponsorId, agentId, amount, idempotencyKey ?? null],
+    );
+
+    // Get updated balances
+    const newWallet = await pool.query(
+      `select balance from sponsor_wallets where sponsor_id = $1`,
+      [sponsorId],
+    );
+    const newAgent = await pool.query(
+      `select balance from agent_credit_balance where agent_id = $1`,
+      [agentId],
+    );
+
+    const evt = await appendEvent(
+      'agent.credits_allocated',
+      {
+        sponsor_id: sponsorId,
+        agent_id: agentId,
+        amount,
+        sponsor_balance: newWallet.rows[0].balance,
+        agent_balance: newAgent.rows[0].balance,
+      },
+      sponsorId,
+      correlationId,
+      idempotencyKey,
+    );
+
+    return {
+      allocated: amount,
+      sponsor_balance: newWallet.rows[0].balance,
+      agent_balance: newAgent.rows[0].balance,
+      event: evt,
+    };
+  });
+
+  return result;
+});
+
+// Get sponsor wallet
+app.get('/sponsor/:sponsorId/credits', async (request, _reply) => {
+  const { sponsorId } = request.params as { sponsorId: string };
+
+  const walletRes = await pool.query(
+    `select balance, updated_at from sponsor_wallets where sponsor_id = $1`,
+    [sponsorId],
+  );
+
+  if (walletRes.rowCount === 0) {
+    return { balance: 0, updated_at: null };
+  }
+
+  const transactionsRes = await pool.query(
+    `select * from credit_transactions where sponsor_id = $1 order by ts desc limit 20`,
+    [sponsorId],
+  );
+
+  return {
+    balance: walletRes.rows[0].balance,
+    updated_at: walletRes.rows[0].updated_at,
+    recent_transactions: transactionsRes.rows,
+  };
+});
+
+// Get agent credit balance
+app.get('/agents/:id/credits', async (request, _reply) => {
+  const { id } = request.params as { id: string };
+
+  const balanceRes = await pool.query(
+    `select balance, updated_at from agent_credit_balance where agent_id = $1`,
+    [id],
+  );
+
+  const transactionsRes = await pool.query(
+    `select * from credit_transactions where agent_id = $1 order by ts desc limit 20`,
+    [id],
+  );
+
+  return {
+    balance: balanceRes.rows[0]?.balance ?? 0,
+    updated_at: balanceRes.rows[0]?.updated_at ?? null,
+    recent_transactions: transactionsRes.rows,
+  };
+});
+
+// ============================================================================
+// PHASE 10: Foundry (Agent Builder) v1
+// ============================================================================
+
+interface FoundryCreateBody {
+  handle?: string;
+  deployment_target?: string;
+  sponsor_id?: string;
+  config?: {
+    cognition_provider?: string;
+    throttle_profile?: string;
+    bias?: Record<string, number>;
+    initial_capacity?: number;
+    max_capacity?: number;
+  };
+}
+
+interface FoundryConfigUpdateBody {
+  cognition_provider?: string;
+  throttle_profile?: string;
+  bias?: Record<string, number>;
+}
+
+// Validate bias values are within bounds
+const validateBias = (bias: Record<string, number>): { valid: boolean; error?: string } => {
+  for (const [key, value] of Object.entries(bias)) {
+    if (typeof value !== 'number' || value < -1 || value > 1) {
+      return { valid: false, error: `bias.${key} must be a number between -1 and 1` };
+    }
+  }
+  return { valid: true };
+};
+
+// Foundry: Create agent with full config
+app.post('/foundry/agents', async (request, reply) => {
+  const body = request.body as FoundryCreateBody;
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+  const idempotencyKey = request.headers['x-idempotency-key'] as string | undefined;
+
+  // Validate cognition_provider if provided
+  if (body.config?.cognition_provider) {
+    const provider = body.config.cognition_provider.toLowerCase().trim();
+    if (!COGNITION_PROVIDERS.includes(provider as CognitionProvider)) {
+      reply.status(400);
+      return { error: 'invalid cognition_provider', valid_providers: COGNITION_PROVIDERS };
+    }
+  }
+
+  // Validate throttle_profile if provided
+  if (body.config?.throttle_profile) {
+    const profile = body.config.throttle_profile.toLowerCase().trim();
+    if (!THROTTLE_PROFILES.includes(profile as ThrottleProfile)) {
+      reply.status(400);
+      return { error: 'invalid throttle_profile', valid_profiles: THROTTLE_PROFILES };
+    }
+  }
+
+  // Validate bias if provided
+  if (body.config?.bias) {
+    const biasValidation = validateBias(body.config.bias);
+    if (!biasValidation.valid) {
+      reply.status(400);
+      return { error: biasValidation.error };
+    }
+  }
+
+  const result = await withIdempotency(pool, idempotencyKey, async () => {
+    // Create agent
+    const agentRes = await pool.query(
+      `insert into agents (handle, deployment_target, sponsor_id, cognition_provider, throttle_profile)
+       values ($1, $2, $3, $4::cognition_provider, $5::throttle_profile)
+       returning *`,
+      [
+        body.handle ?? null,
+        body.deployment_target ?? null,
+        body.sponsor_id ?? null,
+        body.config?.cognition_provider ?? 'none',
+        body.config?.throttle_profile ?? 'normal',
+      ],
+    );
+    const agent = agentRes.rows[0];
+
+    // Initialize capacity
+    const initialCapacity = body.config?.initial_capacity ?? 100;
+    const maxCapacity = body.config?.max_capacity ?? 100;
+    await pool.query(
+      `insert into agent_capacity (agent_id, balance, max_balance) values ($1, $2, $3)`,
+      [agent.id, initialCapacity, maxCapacity],
+    );
+
+    // Initialize config with bias and portable_config
+    const bias = body.config?.bias ?? {};
+    await pool.query(
+      `insert into agent_config (agent_id, bias, foundry_version, portable_config)
+       values ($1, $2, 1, $3)`,
+      [agent.id, JSON.stringify(bias), JSON.stringify({
+        cognition_provider: body.config?.cognition_provider ?? 'none',
+        throttle_profile: body.config?.throttle_profile ?? 'normal',
+        bias,
+      })],
+    );
+
+    // Initialize credit balance
+    await pool.query(
+      `insert into agent_credit_balance (agent_id, balance) values ($1, 0)`,
+      [agent.id],
+    );
+
+    const evt = await appendEvent(
+      'agent.foundry_created',
+      {
+        agent_id: agent.id,
+        handle: agent.handle,
+        deployment_target: agent.deployment_target,
+        sponsor_id: agent.sponsor_id,
+        config: {
+          cognition_provider: agent.cognition_provider,
+          throttle_profile: agent.throttle_profile,
+          bias,
+        },
+      },
+      agent.id,
+      correlationId,
+      idempotencyKey,
+    );
+
+    return { agent, event: evt };
+  });
+
+  reply.status(201);
+  return result;
+});
+
+// Foundry: Update agent config
+app.put('/foundry/agents/:id/config', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = request.body as FoundryConfigUpdateBody;
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Check agent exists
+  const agentCheck = await pool.query(`select * from agents where id = $1`, [id]);
+  if (agentCheck.rowCount === 0) {
+    reply.status(404);
+    return { error: 'agent not found' };
+  }
+
+  const updates: string[] = [];
+  const agentUpdates: string[] = [];
+  const configUpdates: Record<string, unknown> = {};
+
+  // Validate and collect updates
+  if (body.cognition_provider !== undefined) {
+    const provider = body.cognition_provider.toLowerCase().trim();
+    if (!COGNITION_PROVIDERS.includes(provider as CognitionProvider)) {
+      reply.status(400);
+      return { error: 'invalid cognition_provider', valid_providers: COGNITION_PROVIDERS };
+    }
+    agentUpdates.push(`cognition_provider = '${provider}'::cognition_provider`);
+    configUpdates.cognition_provider = provider;
+  }
+
+  if (body.throttle_profile !== undefined) {
+    const profile = body.throttle_profile.toLowerCase().trim();
+    if (!THROTTLE_PROFILES.includes(profile as ThrottleProfile)) {
+      reply.status(400);
+      return { error: 'invalid throttle_profile', valid_profiles: THROTTLE_PROFILES };
+    }
+    agentUpdates.push(`throttle_profile = '${profile}'::throttle_profile`);
+    configUpdates.throttle_profile = profile;
+  }
+
+  if (body.bias !== undefined) {
+    const biasValidation = validateBias(body.bias);
+    if (!biasValidation.valid) {
+      reply.status(400);
+      return { error: biasValidation.error };
+    }
+    updates.push(`bias = $2`);
+    configUpdates.bias = body.bias;
+  }
+
+  // Update agents table if needed
+  if (agentUpdates.length > 0) {
+    agentUpdates.push('updated_at = now()');
+    await pool.query(
+      `update agents set ${agentUpdates.join(', ')} where id = $1`,
+      [id],
+    );
+  }
+
+  // Update agent_config
+  if (Object.keys(configUpdates).length > 0) {
+    // Get current config
+    const configRes = await pool.query(
+      `select portable_config, version from agent_config where agent_id = $1`,
+      [id],
+    );
+    const currentConfig = configRes.rows[0]?.portable_config ?? {};
+    const newVersion = (configRes.rows[0]?.version ?? 0) + 1;
+
+    const newPortableConfig = { ...currentConfig, ...configUpdates };
+
+    await pool.query(
+      `update agent_config set
+         portable_config = $2,
+         version = $3,
+         ${body.bias ? 'bias = $4,' : ''}
+         updated_at = now()
+       where agent_id = $1`,
+      body.bias
+        ? [id, JSON.stringify(newPortableConfig), newVersion, JSON.stringify(body.bias)]
+        : [id, JSON.stringify(newPortableConfig), newVersion],
+    );
+  }
+
+  // Emit config updated event
+  const evt = await appendEvent(
+    'agent.config_updated',
+    {
+      agent_id: id,
+      changes: configUpdates,
+    },
+    id,
+    correlationId,
+  );
+
+  // Get updated agent
+  const updatedRes = await pool.query(
+    `select a.*, c.bias, c.portable_config, c.version as config_version
+     from agents a
+     left join agent_config c on c.agent_id = a.id
+     where a.id = $1`,
+    [id],
+  );
+
+  return { agent: updatedRes.rows[0], event: evt };
+});
+
+// Foundry: Deploy agent
+app.post('/foundry/agents/:id/deploy', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const body = request.body as { deployment_target?: string };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Check agent exists
+  const agentCheck = await pool.query(`select * from agents where id = $1`, [id]);
+  if (agentCheck.rowCount === 0) {
+    reply.status(404);
+    return { error: 'agent not found' };
+  }
+
+  const previousTarget = agentCheck.rows[0].deployment_target;
+  const newTarget = body.deployment_target ?? previousTarget;
+
+  // Check environment allows deployment
+  if (newTarget) {
+    const envRes = await pool.query(
+      `select cognition_availability from environment_states where deployment_target = $1`,
+      [newTarget],
+    );
+    if (envRes.rowCount && envRes.rowCount > 0 && envRes.rows[0].cognition_availability === 'unavailable') {
+      reply.status(400);
+      return { error: 'target_environment_unavailable', deployment_target: newTarget };
+    }
+  }
+
+  // Update agent
+  await pool.query(
+    `update agents set deployment_target = $2, status = 'active', updated_at = now() where id = $1`,
+    [id, newTarget],
+  );
+
+  const evt = await appendEvent(
+    'agent.deployed',
+    {
+      agent_id: id,
+      previous_deployment_target: previousTarget,
+      new_deployment_target: newTarget,
+    },
+    id,
+    correlationId,
+  );
+
+  const updatedRes = await pool.query(`select * from agents where id = $1`, [id]);
+
+  return { agent: updatedRes.rows[0], event: evt };
+});
+
+// Foundry: Get agent with full config
+app.get('/foundry/agents/:id', async (request, reply) => {
+  const { id } = request.params as { id: string };
+
+  const res = await pool.query(
+    `select a.*,
+            c.bias, c.portable_config, c.version as config_version, c.foundry_version,
+            cap.balance as capacity_balance, cap.max_balance as capacity_max,
+            cb.balance as credit_balance
+     from agents a
+     left join agent_config c on c.agent_id = a.id
+     left join agent_capacity cap on cap.agent_id = a.id
+     left join agent_credit_balance cb on cb.agent_id = a.id
+     where a.id = $1`,
+    [id],
+  );
+
+  if (res.rowCount === 0) {
+    reply.status(404);
+    return { error: 'agent not found' };
+  }
+
+  const row = res.rows[0];
+  return {
+    agent: {
+      id: row.id,
+      handle: row.handle,
+      status: row.status,
+      deployment_target: row.deployment_target,
+      sponsor_id: row.sponsor_id,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    },
+    config: {
+      cognition_provider: row.cognition_provider,
+      throttle_profile: row.throttle_profile,
+      bias: row.bias,
+      portable_config: row.portable_config,
+      version: row.config_version,
+      foundry_version: row.foundry_version,
+    },
+    capacity: {
+      balance: row.capacity_balance,
+      max_balance: row.capacity_max,
+    },
+    credits: {
+      balance: row.credit_balance ?? 0,
+    },
+  };
+});
+
+// Foundry: List agents endpoint
+app.get('/foundry/agents', async (request) => {
+  const query = request.query as { sponsor_id?: string; status?: string; limit?: string };
+  const limit = Number(query.limit ?? 50);
+
+  let whereClause = '';
+  const params: unknown[] = [limit];
+
+  if (query.sponsor_id) {
+    whereClause += ' and a.sponsor_id = $2';
+    params.push(query.sponsor_id);
+  }
+  if (query.status) {
+    whereClause += ` and a.status = $${params.length + 1}::agent_status`;
+    params.push(query.status);
+  }
+
+  const res = await pool.query(
+    `select a.id, a.handle, a.status, a.deployment_target, a.sponsor_id,
+            a.cognition_provider, a.throttle_profile, a.created_at
+     from agents a
+     where 1=1 ${whereClause}
+     order by a.created_at desc
+     limit $1`,
+    params,
+  );
+
+  return { agents: res.rows };
+});
+
 // --- Start server ---
 
 const start = async () => {

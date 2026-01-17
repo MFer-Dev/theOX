@@ -366,6 +366,82 @@ create table if not exists ox_world_effects_5m (
 
 create index if not exists ox_world_effects_5m_target_idx on ox_world_effects_5m (deployment_target, bucket_start desc);
 create index if not exists ox_world_effects_5m_bucket_idx on ox_world_effects_5m (bucket_start desc);
+
+-- ============================================================================
+-- PHASE 7: Sponsor Sweep Policies (read-only projections)
+-- Sponsors influence agents indirectly; this is observable evidence.
+-- ============================================================================
+
+-- Sponsor policies projection
+create table if not exists ox_sponsor_policies (
+  id uuid primary key,
+  sponsor_id uuid not null,
+  policy_type text not null,
+  cadence_seconds int not null,
+  active boolean not null default true,
+  created_at timestamptz not null,
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_sponsor_policies_sponsor_idx on ox_sponsor_policies (sponsor_id);
+create index if not exists ox_sponsor_policies_active_idx on ox_sponsor_policies (active) where active = true;
+
+-- Sponsor policy applications projection
+create table if not exists ox_sponsor_policy_applications (
+  id uuid primary key default gen_random_uuid(),
+  policy_id uuid not null,
+  sponsor_id uuid not null,
+  agent_id uuid not null,
+  policy_type text not null,
+  applied boolean not null,
+  reason text not null,
+  diff_json jsonb not null default '{}',
+  applied_at timestamptz not null,
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_sponsor_policy_applications_policy_idx on ox_sponsor_policy_applications (policy_id, applied_at desc);
+create index if not exists ox_sponsor_policy_applications_agent_idx on ox_sponsor_policy_applications (agent_id, applied_at desc);
+create index if not exists ox_sponsor_policy_applications_sponsor_idx on ox_sponsor_policy_applications (sponsor_id, applied_at desc);
+
+-- ============================================================================
+-- PHASE 9: Closed-Loop Economy (read-only projections)
+-- Credits flow is observable as evidence.
+-- ============================================================================
+
+-- Credit transactions projection (read-only)
+create table if not exists ox_credit_transactions (
+  id uuid primary key default gen_random_uuid(),
+  ts timestamptz not null,
+  sponsor_id uuid,
+  agent_id uuid,
+  type text not null,
+  amount bigint not null,
+  balance_after bigint,
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_credit_transactions_sponsor_idx on ox_credit_transactions (sponsor_id, ts desc);
+create index if not exists ox_credit_transactions_agent_idx on ox_credit_transactions (agent_id, ts desc);
+create index if not exists ox_credit_transactions_type_idx on ox_credit_transactions (type, ts desc);
+
+-- ============================================================================
+-- PHASE 10: Foundry (read-only projections)
+-- Agent configurations and deployments are observable.
+-- ============================================================================
+
+-- Agent config history projection
+create table if not exists ox_agent_config_history (
+  id uuid primary key default gen_random_uuid(),
+  agent_id uuid not null,
+  ts timestamptz not null,
+  change_type text not null,
+  changes_json jsonb not null default '{}',
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_agent_config_history_agent_idx on ox_agent_config_history (agent_id, ts desc);
+create index if not exists ox_agent_config_history_type_idx on ox_agent_config_history (change_type, ts desc);
 `;
 
 async function run() {

@@ -137,7 +137,7 @@ const appendEvent = async (
   idempotencyKey?: string,
 ) => {
   const evt = buildEvent(eventType, payload, {
-    actorId: undefined, // Physics engine has no agent identity
+    actorId: 'system:ox-physics', // Physics engine is a system actor
     correlationId,
   });
   await persistEvent(pool, evt, { idempotencyKey, context: payload });

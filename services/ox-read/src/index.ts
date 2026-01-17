@@ -1284,13 +1284,152 @@ const handleEvent = async (event: EventEnvelope<AgentEventPayload>): Promise<voi
   } catch (err) {
     app.log.warn({ err, event_id: event.event_id }, 'Deployment drift computation warning');
   }
+
+  // 11. Phase 7: Sponsor policy events
+  try {
+    if (event.event_type.startsWith('sponsor.policy_') || event.event_type.includes('sponsor_policy_')) {
+      await handleSponsorPolicyEventInline(event);
+    }
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Sponsor policy event handling warning');
+  }
+
+  // 12. Phase 9: Credit events
+  try {
+    if (event.event_type.includes('credits_')) {
+      await handleCreditEventInline(event);
+    }
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Credit event handling warning');
+  }
+
+  // 13. Phase 10: Foundry events
+  try {
+    if (event.event_type === 'agent.foundry_created' ||
+        event.event_type === 'agent.config_updated' ||
+        event.event_type === 'agent.deployed') {
+      await handleFoundryEventInline(event);
+    }
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Foundry event handling warning');
+  }
+};
+
+// --- Phase 7-10 Inline Event Handlers ---
+
+const handleSponsorPolicyEventInline = async (event: EventEnvelope<AgentEventPayload>): Promise<void> => {
+  const payload = event.payload;
+  const eventTs = new Date(event.occurred_at);
+
+  switch (event.event_type) {
+    case 'sponsor.policy_created': {
+      await pool.query(
+        `insert into ox_sponsor_policies (id, sponsor_id, policy_type, cadence_seconds, active, created_at, source_event_id)
+         values ($1, $2, $3, $4, true, $5, $6)
+         on conflict (source_event_id) do nothing`,
+        [payload.policy_id, payload.sponsor_id, payload.policy_type, payload.cadence_seconds, eventTs, event.event_id],
+      );
+      break;
+    }
+    case 'sponsor.policy_disabled': {
+      await pool.query(`update ox_sponsor_policies set active = false where id = $1`, [payload.policy_id]);
+      break;
+    }
+    case 'agent.sponsor_policy_applied':
+    case 'agent.sponsor_policy_skipped': {
+      const applied = event.event_type === 'agent.sponsor_policy_applied';
+      await pool.query(
+        `insert into ox_sponsor_policy_applications
+           (policy_id, sponsor_id, agent_id, policy_type, applied, reason, diff_json, applied_at, source_event_id)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         on conflict (source_event_id) do nothing`,
+        [payload.policy_id, payload.sponsor_id, payload.agent_id, payload.policy_type, applied,
+         payload.reason ?? 'policy_applied', JSON.stringify(payload.diff ?? {}), eventTs, event.event_id],
+      );
+      if (applied) {
+        await pool.query(
+          `insert into ox_artifacts (artifact_type, source_event_id, agent_id, deployment_target, title, content_summary, metadata_json)
+           values ('sweep', $1, $2, $3, $4, $5, $6)
+           on conflict (source_event_id, artifact_type) do nothing`,
+          [event.event_id, payload.agent_id, payload.deployment_target ?? 'unknown',
+           `Sponsor policy ${payload.policy_type} applied`, `Policy ${payload.policy_id} applied`,
+           JSON.stringify({ policy_id: payload.policy_id, sponsor_id: payload.sponsor_id, diff: payload.diff })],
+        );
+      }
+      break;
+    }
+  }
+};
+
+const handleCreditEventInline = async (event: EventEnvelope<AgentEventPayload>): Promise<void> => {
+  const payload = event.payload;
+  const eventTs = new Date(event.occurred_at);
+
+  switch (event.event_type) {
+    case 'sponsor.credits_purchased': {
+      await pool.query(
+        `insert into ox_credit_transactions (ts, sponsor_id, type, amount, balance_after, source_event_id)
+         values ($1, $2, 'purchase', $3, $4, $5)
+         on conflict (source_event_id) do nothing`,
+        [eventTs, payload.sponsor_id, payload.amount, payload.new_balance, event.event_id],
+      );
+      break;
+    }
+    case 'agent.credits_allocated': {
+      await pool.query(
+        `insert into ox_credit_transactions (ts, sponsor_id, agent_id, type, amount, balance_after, source_event_id)
+         values ($1, $2, $3, 'allocation', $4, $5, $6)
+         on conflict (source_event_id) do nothing`,
+        [eventTs, payload.sponsor_id, payload.agent_id, payload.amount, payload.agent_balance, event.event_id],
+      );
+      break;
+    }
+  }
+};
+
+const handleFoundryEventInline = async (event: EventEnvelope<AgentEventPayload>): Promise<void> => {
+  const payload = event.payload;
+  const eventTs = new Date(event.occurred_at);
+
+  switch (event.event_type) {
+    case 'agent.foundry_created': {
+      await pool.query(
+        `insert into ox_agent_config_history (agent_id, ts, change_type, changes_json, source_event_id)
+         values ($1, $2, 'created', $3, $4)
+         on conflict (source_event_id) do nothing`,
+        [payload.agent_id, eventTs, JSON.stringify(payload.config ?? {}), event.event_id],
+      );
+      break;
+    }
+    case 'agent.config_updated': {
+      await pool.query(
+        `insert into ox_agent_config_history (agent_id, ts, change_type, changes_json, source_event_id)
+         values ($1, $2, 'updated', $3, $4)
+         on conflict (source_event_id) do nothing`,
+        [payload.agent_id, eventTs, JSON.stringify(payload.changes ?? {}), event.event_id],
+      );
+      break;
+    }
+    case 'agent.deployed': {
+      await pool.query(
+        `insert into ox_agent_config_history (agent_id, ts, change_type, changes_json, source_event_id)
+         values ($1, $2, 'deployed', $3, $4)
+         on conflict (source_event_id) do nothing`,
+        [payload.agent_id, eventTs, JSON.stringify({
+          previous_deployment_target: payload.previous_deployment_target,
+          new_deployment_target: payload.new_deployment_target,
+        }), event.event_id],
+      );
+      break;
+    }
+  }
 };
 
 // --- Start consumer ---
 
 const startConsumer = async () => {
   try {
-    // Consumer for agent events
+    // Consumer for agent events (with Phase 7-10 support integrated)
     await runConsumer({
       groupId: 'ox-read-materializer',
       topics: ['events.agents.v1'],
@@ -2477,6 +2616,200 @@ app.get('/ox/drift/summary', async (request, reply) => {
     deployments: deploymentRes.rows.map((row) => ({
       deployment_target: row.deployment_target,
       agent_count: Number(row.agent_count),
+    })),
+  };
+});
+
+// --- Phase 7: Sponsor Policy Endpoints (analyst+) ---
+
+app.get('/ox/sponsors/:id/policies', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/artifacts')) { // analyst+ required
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const res = await pool.query(
+    `select id, sponsor_id, policy_type, cadence_seconds, active, created_at
+     from ox_sponsor_policies
+     where sponsor_id = $1
+     order by created_at desc`,
+    [id],
+  );
+
+  await logObserverAccess(`/ox/sponsors/${id}/policies`, {}, res.rowCount ?? 0, observerId, observerRole);
+
+  return { policies: res.rows };
+});
+
+app.get('/ox/sponsors/:id/policy-runs', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/artifacts')) { // analyst+ required
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select id, policy_id, sponsor_id, agent_id, policy_type, applied, reason, diff_json, applied_at
+     from ox_sponsor_policy_applications
+     where sponsor_id = $1
+     order by applied_at desc
+     limit $2`,
+    [id, limit],
+  );
+
+  await logObserverAccess(`/ox/sponsors/${id}/policy-runs`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    policy_applications: res.rows.map((row) => ({
+      id: row.id,
+      policy_id: row.policy_id,
+      sponsor_id: row.sponsor_id,
+      agent_id: row.agent_id,
+      policy_type: row.policy_type,
+      applied: row.applied,
+      reason: row.reason,
+      diff: row.diff_json,
+      applied_at: row.applied_at,
+    })),
+  };
+});
+
+// --- Phase 9: Credit Endpoints (analyst+) ---
+
+app.get('/ox/agents/:id/credits', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/artifacts')) { // analyst+ required
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select id, ts, sponsor_id, type, amount, balance_after
+     from ox_credit_transactions
+     where agent_id = $1
+     order by ts desc
+     limit $2`,
+    [id, limit],
+  );
+
+  await logObserverAccess(`/ox/agents/${id}/credits`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { transactions: res.rows };
+});
+
+app.get('/ox/sponsors/:id/credits', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/drift')) { // auditor required
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select id, ts, agent_id, type, amount, balance_after
+     from ox_credit_transactions
+     where sponsor_id = $1
+     order by ts desc
+     limit $2`,
+    [id, limit],
+  );
+
+  await logObserverAccess(`/ox/sponsors/${id}/credits`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { transactions: res.rows };
+});
+
+app.get('/ox/credit-requests', async (request, reply) => {
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/artifacts')) { // analyst+ required
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  // Find artifacts that are credit requests
+  const res = await pool.query(
+    `select id, agent_id, deployment_target, title, content_summary, metadata_json, created_at
+     from ox_artifacts
+     where artifact_type = 'request_credits'
+     order by created_at desc
+     limit $1`,
+    [limit],
+  );
+
+  await logObserverAccess('/ox/credit-requests', query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    requests: res.rows.map((row) => ({
+      id: row.id,
+      agent_id: row.agent_id,
+      deployment_target: row.deployment_target,
+      title: row.title,
+      summary: row.content_summary,
+      metadata: row.metadata_json,
+      created_at: row.created_at,
+    })),
+  };
+});
+
+// --- Phase 10: Agent Config History Endpoint (analyst+) ---
+
+app.get('/ox/agents/:id/config-history', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!canAccessEndpoint(observerRole, '/ox/artifacts')) { // analyst+ required
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select id, ts, change_type, changes_json
+     from ox_agent_config_history
+     where agent_id = $1
+     order by ts desc
+     limit $2`,
+    [id, limit],
+  );
+
+  await logObserverAccess(`/ox/agents/${id}/config-history`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    agent_id: id,
+    history: res.rows.map((row) => ({
+      id: row.id,
+      ts: row.ts,
+      change_type: row.change_type,
+      changes: row.changes_json,
     })),
   };
 });
