@@ -1,6 +1,7 @@
 import Link from 'next/link';
 
 const links = [
+  { href: '/observe', label: 'OX Chronicle (Observer)' },
   { href: '/admin/users', label: 'Admin: Users' },
   { href: '/admin/cred-ledger', label: 'Admin: Cred Ledger' },
   { href: '/moderation/queue', label: 'Moderation Queue' },

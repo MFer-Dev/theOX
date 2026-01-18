@@ -4384,6 +4384,490 @@ app.get('/ox/cursor', async (request) => {
 });
 
 // ============================================================================
+// CHRONICLE LAYER: First Observer Experience
+// Translates raw OX projections into human-legible sentences
+// ============================================================================
+
+/**
+ * Chronicle entry categories - what happened, not what it means
+ */
+const CHRONICLE_CATEGORIES = [
+  'emergence',    // New artifacts, claims, agents appearing
+  'convergence',  // Agents/ideas coming together
+  'conflict',     // Opposition, contradiction, escalation
+  'silence',      // Withdrawal, inactivity
+  'pressure',     // Physics/sponsor pressure shifts
+  'drift',        // Deployment divergence
+  'fracture',     // Group splits
+  'wave',         // Collective phenomena
+] as const;
+
+type ChronicleCategory = (typeof CHRONICLE_CATEGORIES)[number];
+
+interface ChronicleEntry {
+  id: string;
+  ts: string;
+  category: ChronicleCategory;
+  text: string;
+  evidence: { ids: string[] }; // Internal only, never exposed to viewer
+}
+
+/**
+ * Sentence templates - descriptive, never interpretive.
+ * No agent IDs, no sponsor IDs, no credits, no probabilities, no moralizing.
+ */
+const generateSentence = (category: ChronicleCategory, counts: Record<string, number>, context?: Record<string, unknown>): string => {
+  switch (category) {
+    case 'emergence': {
+      const artifacts = counts.artifacts ?? 0;
+      const sessions = counts.sessions ?? 0;
+      if (artifacts > 0 && sessions > 0) {
+        return `${artifacts} new artifact${artifacts > 1 ? 's' : ''} emerged across ${sessions} scene${sessions > 1 ? 's' : ''}.`;
+      } else if (artifacts > 0) {
+        return `${artifacts} new artifact${artifacts > 1 ? 's' : ''} appeared.`;
+      } else if (sessions > 0) {
+        return `${sessions} new scene${sessions > 1 ? 's' : ''} began.`;
+      }
+      return 'Something emerged.';
+    }
+
+    case 'convergence': {
+      const collisions = counts.collisions ?? 0;
+      const agents = counts.agents ?? 0;
+      if (collisions > 3) {
+        return `A burst of convergence: ${collisions} encounters in close proximity.`;
+      } else if (agents > 2) {
+        return `Several agents converged briefly.`;
+      }
+      return 'A moment of convergence occurred.';
+    }
+
+    case 'conflict': {
+      const chains = counts.chains ?? 0;
+      const fractures = counts.fractures ?? 0;
+      if (fractures > 0) {
+        return `A conflict fractured into separate paths.`;
+      } else if (chains > 1) {
+        return `${chains} conflict chain${chains > 1 ? 's' : ''} intensified.`;
+      } else if (chains === 1) {
+        const status = context?.status as string | undefined;
+        if (status === 'escalated') {
+          return 'A conflict escalated.';
+        }
+        return 'A conflict chain opened.';
+      }
+      return 'Opposition emerged.';
+    }
+
+    case 'silence': {
+      const windows = counts.windows ?? 0;
+      const agents = counts.agents ?? 0;
+      if (agents > 3) {
+        return `Widespread quiet: multiple agents withdrew.`;
+      } else if (windows > 0) {
+        return `Activity paused. Silence settled.`;
+      }
+      return 'A period of silence began.';
+    }
+
+    case 'pressure': {
+      const intensity = counts.intensity ?? 0;
+      const regime = context?.regime as string | undefined;
+      if (regime) {
+        return `The environment shifted to ${regime} conditions.`;
+      } else if (intensity > 50) {
+        return 'Pressure intensified across the environment.';
+      } else if (intensity < -50) {
+        return 'Pressure eased.';
+      }
+      return 'Environmental pressure fluctuated.';
+    }
+
+    case 'drift': {
+      return 'Behavior diverged across deployment contexts.';
+    }
+
+    case 'fracture': {
+      const groups = counts.groups ?? 2;
+      return `A group split into ${groups} separate paths.`;
+    }
+
+    case 'wave': {
+      const waveType = context?.wave_type as string | undefined;
+      const magnitude = counts.magnitude ?? 0;
+      if (waveType === 'cascade') {
+        return 'A cascade rippled through the system.';
+      } else if (waveType === 'flash') {
+        return 'A flash of coordinated activity occurred.';
+      } else if (magnitude > 5) {
+        return 'A collective wave swept through.';
+      }
+      return 'A wave phenomenon was detected.';
+    }
+
+    default:
+      return 'Something happened.';
+  }
+};
+
+/**
+ * Chronicle Reducer: Pull from projections, generate entries
+ */
+const generateChronicleEntries = async (
+  deploymentTarget: string,
+  windowSeconds: number,
+  limit: number,
+): Promise<ChronicleEntry[]> => {
+  const entries: ChronicleEntry[] = [];
+  const windowStart = new Date(Date.now() - windowSeconds * 1000);
+
+  // 1. EMERGENCE: New artifacts and sessions
+  try {
+    const artifactRes = await pool.query(
+      `select id, artifact_type, created_at
+       from ox_artifacts
+       where deployment_target = $1 and created_at > $2
+       order by created_at desc
+       limit 10`,
+      [deploymentTarget, windowStart],
+    );
+
+    const sessionRes = await pool.query(
+      `select session_id, start_ts
+       from ox_sessions
+       where deployment_target = $1 and start_ts > $2
+       order by start_ts desc
+       limit 10`,
+      [deploymentTarget, windowStart],
+    );
+
+    if (artifactRes.rowCount || sessionRes.rowCount) {
+      const artifactCount = artifactRes.rowCount ?? 0;
+      const sessionCount = sessionRes.rowCount ?? 0;
+      const latestTs = artifactRes.rows[0]?.created_at ?? sessionRes.rows[0]?.start_ts ?? new Date();
+
+      entries.push({
+        id: `emergence-${Date.now()}`,
+        ts: new Date(latestTs).toISOString(),
+        category: 'emergence',
+        text: generateSentence('emergence', { artifacts: artifactCount, sessions: sessionCount }),
+        evidence: {
+          ids: [
+            ...artifactRes.rows.map(r => r.id),
+            ...sessionRes.rows.map(r => r.session_id),
+          ],
+        },
+      });
+    }
+  } catch {
+    // Projection may not exist, continue
+  }
+
+  // 2. CONVERGENCE: Locality collisions
+  try {
+    const collisionRes = await pool.query(
+      `select locality_id, collisions, unique_agents, window_start
+       from ox_locality_encounters_5m
+       where deployment_target = $1 and window_start > $2 and collisions > 0
+       order by collisions desc
+       limit 5`,
+      [deploymentTarget, windowStart],
+    );
+
+    if (collisionRes.rowCount && collisionRes.rowCount > 0) {
+      const totalCollisions = collisionRes.rows.reduce((sum, r) => sum + (r.collisions || 0), 0);
+      const totalAgents = collisionRes.rows.reduce((sum, r) => sum + (r.unique_agents || 0), 0);
+
+      if (totalCollisions > 0) {
+        entries.push({
+          id: `convergence-${Date.now()}`,
+          ts: new Date(collisionRes.rows[0].window_start).toISOString(),
+          category: 'convergence',
+          text: generateSentence('convergence', { collisions: totalCollisions, agents: totalAgents }),
+          evidence: { ids: collisionRes.rows.map(r => r.locality_id) },
+        });
+      }
+    }
+  } catch {
+    // Continue
+  }
+
+  // 3. CONFLICT: Conflict chains and escalations
+  try {
+    const conflictRes = await pool.query(
+      `select id, started_at, status, last_activity_at, summary_json
+       from ox_conflict_chains
+       where deployment_target = $1 and last_activity_at > $2
+       order by last_activity_at desc
+       limit 5`,
+      [deploymentTarget, windowStart],
+    );
+
+    const fractureRes = await pool.query(
+      `select id, window_start
+       from ox_fractures
+       where deployment_target = $1 and window_start > $2
+       order by window_start desc
+       limit 3`,
+      [deploymentTarget, windowStart],
+    );
+
+    if (conflictRes.rowCount || fractureRes.rowCount) {
+      const chainCount = conflictRes.rowCount ?? 0;
+      const fractureCount = fractureRes.rowCount ?? 0;
+      const latestTs = conflictRes.rows[0]?.last_activity_at ?? fractureRes.rows[0]?.window_start ?? new Date();
+
+      entries.push({
+        id: `conflict-${Date.now()}`,
+        ts: new Date(latestTs).toISOString(),
+        category: 'conflict',
+        text: generateSentence('conflict', { chains: chainCount, fractures: fractureCount }, {
+          status: conflictRes.rows[0]?.status,
+        }),
+        evidence: {
+          ids: [
+            ...conflictRes.rows.map(r => r.id),
+            ...fractureRes.rows.map(r => r.id),
+          ],
+        },
+      });
+    }
+  } catch {
+    // Continue
+  }
+
+  // 4. SILENCE: Silence windows
+  try {
+    const silenceRes = await pool.query(
+      `select id, agent_id, silence_start
+       from ox_silence_windows
+       where deployment_target = $1 and silence_start > $2 and silence_end is null
+       order by silence_start desc
+       limit 10`,
+      [deploymentTarget, windowStart],
+    );
+
+    if (silenceRes.rowCount && silenceRes.rowCount > 0) {
+      const uniqueAgents = new Set(silenceRes.rows.map(r => r.agent_id)).size;
+
+      entries.push({
+        id: `silence-${Date.now()}`,
+        ts: new Date(silenceRes.rows[0].silence_start).toISOString(),
+        category: 'silence',
+        text: generateSentence('silence', { windows: silenceRes.rowCount, agents: uniqueAgents }),
+        evidence: { ids: silenceRes.rows.map(r => r.id) },
+      });
+    }
+  } catch {
+    // Continue
+  }
+
+  // 5. PRESSURE: Braid intensity shifts and regime changes
+  try {
+    const braidRes = await pool.query(
+      `select id, total_intensity, computed_at
+       from ox_pressure_braids
+       where deployment_target = $1 and computed_at > $2
+       order by computed_at desc
+       limit 5`,
+      [deploymentTarget, windowStart],
+    );
+
+    const worldRes = await pool.query(
+      `select regime_name, weather_state, ts
+       from ox_world_state_history
+       where deployment_target = $1 and ts > $2
+       order by ts desc
+       limit 3`,
+      [deploymentTarget, windowStart],
+    );
+
+    if (braidRes.rowCount || worldRes.rowCount) {
+      const avgIntensity = braidRes.rows.length > 0
+        ? braidRes.rows.reduce((sum, r) => sum + (r.total_intensity || 0), 0) / braidRes.rows.length
+        : 0;
+      const latestRegime = worldRes.rows[0]?.regime_name;
+      const latestTs = braidRes.rows[0]?.computed_at ?? worldRes.rows[0]?.ts ?? new Date();
+
+      entries.push({
+        id: `pressure-${Date.now()}`,
+        ts: new Date(latestTs).toISOString(),
+        category: 'pressure',
+        text: generateSentence('pressure', { intensity: avgIntensity }, { regime: latestRegime }),
+        evidence: {
+          ids: [
+            ...braidRes.rows.map(r => r.id),
+          ],
+        },
+      });
+    }
+  } catch {
+    // Continue
+  }
+
+  // 6. WAVE: Flash phenomena
+  try {
+    const waveRes = await pool.query(
+      `select id, wave_type, started_at, magnitude_json
+       from ox_waves
+       where deployment_target = $1 and started_at > $2
+       order by started_at desc
+       limit 5`,
+      [deploymentTarget, windowStart],
+    );
+
+    if (waveRes.rowCount && waveRes.rowCount > 0) {
+      const wave = waveRes.rows[0];
+      const magnitude = (wave.magnitude_json?.peak as number) ?? 0;
+
+      entries.push({
+        id: `wave-${Date.now()}`,
+        ts: new Date(wave.started_at).toISOString(),
+        category: 'wave',
+        text: generateSentence('wave', { magnitude }, { wave_type: wave.wave_type }),
+        evidence: { ids: waveRes.rows.map(r => r.id) },
+      });
+    }
+  } catch {
+    // Continue
+  }
+
+  // 7. FRACTURE: Group splits (if not already captured in conflict)
+  try {
+    const fractureRes = await pool.query(
+      `select id, window_start, group_a_agents, group_b_agents
+       from ox_fractures
+       where deployment_target = $1 and window_start > $2
+       order by window_start desc
+       limit 3`,
+      [deploymentTarget, windowStart],
+    );
+
+    // Only add if we haven't already added a conflict entry with fractures
+    const hasConflictEntry = entries.some(e => e.category === 'conflict' && e.text.includes('fracture'));
+
+    if (fractureRes.rowCount && fractureRes.rowCount > 0 && !hasConflictEntry) {
+      entries.push({
+        id: `fracture-${Date.now()}`,
+        ts: new Date(fractureRes.rows[0].window_start).toISOString(),
+        category: 'fracture',
+        text: generateSentence('fracture', { groups: 2 }),
+        evidence: { ids: fractureRes.rows.map(r => r.id) },
+      });
+    }
+  } catch {
+    // Continue
+  }
+
+  // 8. DRIFT: Deployment drift
+  try {
+    const driftRes = await pool.query(
+      `select id, agent_id, window_end
+       from ox_deployment_drift
+       where (deployment_a = $1 or deployment_b = $1) and window_end > $2
+       order by window_end desc
+       limit 3`,
+      [deploymentTarget, windowStart],
+    );
+
+    if (driftRes.rowCount && driftRes.rowCount > 0) {
+      entries.push({
+        id: `drift-${Date.now()}`,
+        ts: new Date(driftRes.rows[0].window_end).toISOString(),
+        category: 'drift',
+        text: generateSentence('drift', {}),
+        evidence: { ids: driftRes.rows.map(r => r.id) },
+      });
+    }
+  } catch {
+    // Continue
+  }
+
+  // Sort by timestamp descending and limit
+  entries.sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
+  return entries.slice(0, limit);
+};
+
+/**
+ * GET /ox/chronicle - The First Seat
+ *
+ * Returns a chronological stream of human-readable entries describing
+ * what is happening in the OX. Viewer-safe by default.
+ *
+ * Query params:
+ * - window: Time window in seconds (default 60, max 300)
+ * - limit: Max entries to return (default 20, max 50)
+ * - deployment: Deployment target (default ox-sandbox)
+ */
+app.get('/ox/chronicle', async (request) => {
+  const query = request.query as {
+    window?: string;
+    limit?: string;
+    deployment?: string;
+  };
+
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const windowSeconds = Math.min(parseInt(query.window ?? '60', 10), 300);
+  const limit = Math.min(parseInt(query.limit ?? '20', 10), 50);
+  const deploymentTarget = query.deployment ?? 'ox-sandbox';
+
+  // Generate chronicle entries
+  const entries = await generateChronicleEntries(deploymentTarget, windowSeconds, limit);
+
+  // Log observer access
+  await logObserverAccess('/ox/chronicle', query as Record<string, unknown>, entries.length, observerId, 'viewer');
+
+  // Viewer-safe output: only ts and text
+  const viewerEntries = entries.map(e => ({
+    ts: e.ts,
+    text: e.text,
+  }));
+
+  return viewerEntries;
+});
+
+/**
+ * GET /ox/chronicle/debug - Debug endpoint for analysts/auditors
+ *
+ * Returns full chronicle entries including evidence (IDs).
+ */
+app.get('/ox/chronicle/debug', async (request) => {
+  const query = request.query as {
+    window?: string;
+    limit?: string;
+    deployment?: string;
+  };
+
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const headerRole = request.headers['x-observer-role'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, headerRole);
+
+  // Only analysts and auditors can access debug endpoint
+  if (observerRole === 'viewer') {
+    return { error: 'insufficient_role', message: 'Analyst or auditor role required' };
+  }
+
+  const windowSeconds = Math.min(parseInt(query.window ?? '60', 10), 300);
+  const limit = Math.min(parseInt(query.limit ?? '20', 10), 50);
+  const deploymentTarget = query.deployment ?? 'ox-sandbox';
+
+  const entries = await generateChronicleEntries(deploymentTarget, windowSeconds, limit);
+
+  await logObserverAccess('/ox/chronicle/debug', query as Record<string, unknown>, entries.length, observerId, observerRole);
+
+  // Return full entries for debug
+  return entries.map(e => ({
+    id: e.id,
+    ts: e.ts,
+    category: e.category,
+    text: e.text,
+    evidence_count: e.evidence.ids.length,
+    // Auditor gets full evidence
+    ...(observerRole === 'auditor' ? { evidence: e.evidence } : {}),
+  }));
+});
+
+// ============================================================================
 // Internal Endpoints (for physics service)
 // ============================================================================
 

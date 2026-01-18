@@ -1,7 +1,7 @@
 # theOX Monorepo Makefile
 # Run `make help` for available targets
 
-.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21
+.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21 test-chronicle smoke-chronicle
 
 # Default target
 help:
@@ -296,6 +296,24 @@ test-phase12-20:
 test-phase21-24:
 	@echo "Running Phase 21-24 invariant tests..."
 	pnpm exec tsx --test tests/invariants/ox_phase21_24.test.ts
+
+test-chronicle:
+	@echo "Running Chronicle invariant tests..."
+	pnpm exec tsx --test tests/invariants/ox_chronicle.test.ts
+
+smoke-chronicle:
+	@echo "=== Chronicle smoke test: The First Seat ==="
+	@echo ""
+	@echo "--- GET /ox/chronicle (viewer) ---"
+	curl -s "http://localhost:4018/ox/chronicle?deployment=ox-sandbox&limit=5" | jq .
+	@echo ""
+	@echo "--- GET /ox/chronicle (empty window) ---"
+	curl -s "http://localhost:4018/ox/chronicle?deployment=nonexistent&window=5" | jq .
+	@echo ""
+	@echo "--- GET /ox/chronicle/debug (auditor) ---"
+	curl -s -H "x-observer-role: auditor" "http://localhost:4018/ox/chronicle/debug?deployment=ox-sandbox&limit=3" | jq .
+	@echo ""
+	@echo "=== Chronicle smoke test complete ==="
 
 smoke-phase21:
 	@echo "=== Phase 21 smoke test: Observer Lens ==="
