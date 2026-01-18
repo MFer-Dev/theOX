@@ -326,6 +326,9 @@ app.post('/agents', async (request, reply) => {
       idempotencyKey,
     );
 
+    // Phase 12: Assign locality memberships for this agent
+    await assignLocalityMembership(agent.id, agent.deployment_target, correlationId);
+
     return { agent, event: evt };
   });
 
@@ -2614,6 +2617,1038 @@ app.get('/foundry/agents', async (request) => {
   );
 
   return { agents: res.rows };
+});
+
+// ============================================================================
+// PHASE 11: Sponsor Braids & Pressure Composition
+// Multiple sponsors influence the same agent/deployment through pressures.
+// This is curling, not puppeteering.
+// ============================================================================
+
+const PRESSURE_TYPES = ['capacity', 'throttle', 'cognition', 'redeploy_bias'] as const;
+type PressureType = (typeof PRESSURE_TYPES)[number];
+
+// Credit cost formula: 10 credits * abs(magnitude)
+const PRESSURE_CREDIT_COST_PER_MAGNITUDE = 10;
+
+// Expiration: 10 half-lives (~0.1% remaining)
+const PRESSURE_HALF_LIFE_MULTIPLIER = 10;
+
+/**
+ * Compute decayed magnitude using exponential half-life decay.
+ * decayedMagnitude = magnitude * Math.pow(0.5, elapsedSeconds / halfLifeSeconds)
+ */
+function computeDecayedMagnitude(
+  magnitude: number,
+  halfLifeSeconds: number,
+  elapsedSeconds: number,
+): number {
+  return magnitude * Math.pow(0.5, elapsedSeconds / halfLifeSeconds);
+}
+
+// Issue a new pressure (consumes credits)
+app.post('/sponsor/:sponsorId/pressures', async (request, reply) => {
+  const { sponsorId } = request.params as { sponsorId: string };
+  const body = request.body as {
+    target_deployment: string;
+    target_agent_id?: string;
+    pressure_type: string;
+    magnitude: number;
+    half_life_seconds: number;
+  };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Validate pressure type
+  const pressureType = body.pressure_type as PressureType;
+  if (!PRESSURE_TYPES.includes(pressureType)) {
+    reply.status(400);
+    return { error: 'invalid pressure_type', valid_types: PRESSURE_TYPES };
+  }
+
+  // Validate magnitude
+  if (typeof body.magnitude !== 'number' || body.magnitude < -100 || body.magnitude > 100) {
+    reply.status(400);
+    return { error: 'magnitude must be a number between -100 and 100' };
+  }
+
+  // Validate half_life_seconds
+  if (typeof body.half_life_seconds !== 'number' || body.half_life_seconds < 60) {
+    reply.status(400);
+    return { error: 'half_life_seconds must be at least 60 seconds' };
+  }
+
+  // Validate target_deployment
+  if (!body.target_deployment) {
+    reply.status(400);
+    return { error: 'target_deployment is required' };
+  }
+
+  // Calculate credit cost
+  const creditCost = Math.ceil(Math.abs(body.magnitude) * PRESSURE_CREDIT_COST_PER_MAGNITUDE);
+
+  // Check sponsor wallet balance
+  const walletRes = await pool.query(
+    `select balance from sponsor_wallets where sponsor_id = $1 for update`,
+    [sponsorId],
+  );
+
+  if (walletRes.rowCount === 0 || walletRes.rows[0].balance < creditCost) {
+    reply.status(400);
+    return {
+      error: 'insufficient_credits',
+      required: creditCost,
+      available: walletRes.rows[0]?.balance ?? 0,
+    };
+  }
+
+  // Deduct credits from sponsor wallet
+  await pool.query(
+    `update sponsor_wallets set balance = balance - $2, updated_at = now() where sponsor_id = $1`,
+    [sponsorId, creditCost],
+  );
+
+  // Calculate expiration (10 half-lives)
+  const expiresAt = new Date(
+    Date.now() + body.half_life_seconds * 1000 * PRESSURE_HALF_LIFE_MULTIPLIER,
+  );
+
+  // Create pressure
+  const pressureRes = await pool.query(
+    `insert into sponsor_pressures (
+       sponsor_id, target_deployment, target_agent_id, pressure_type,
+       magnitude, half_life_seconds, expires_at, credit_cost
+     ) values ($1, $2, $3, $4::sponsor_pressure_type, $5, $6, $7, $8)
+     returning *`,
+    [
+      sponsorId,
+      body.target_deployment,
+      body.target_agent_id ?? null,
+      pressureType,
+      body.magnitude,
+      body.half_life_seconds,
+      expiresAt,
+      creditCost,
+    ],
+  );
+
+  const pressure = pressureRes.rows[0];
+
+  // Log credit consumption
+  await pool.query(
+    `insert into pressure_credit_consumption (pressure_id, sponsor_id, amount, reason)
+     values ($1, $2, $3, $4)`,
+    [pressure.id, sponsorId, creditCost, 'pressure_issued'],
+  );
+
+  // Emit event
+  const evt = await appendEvent(
+    'sponsor.pressure_issued',
+    {
+      pressure_id: pressure.id,
+      sponsor_id: sponsorId,
+      target_deployment: body.target_deployment,
+      target_agent_id: body.target_agent_id ?? null,
+      pressure_type: pressureType,
+      magnitude: body.magnitude,
+      half_life_seconds: body.half_life_seconds,
+      expires_at: expiresAt.toISOString(),
+      credit_cost: creditCost,
+    },
+    sponsorId,
+    correlationId,
+  );
+
+  reply.status(201);
+  return { pressure, event: evt };
+});
+
+// List active pressures for a sponsor
+app.get('/sponsor/:sponsorId/pressures', async (request) => {
+  const { sponsorId } = request.params as { sponsorId: string };
+  const query = request.query as { include_expired?: string; limit?: string };
+  const includeExpired = query.include_expired === 'true';
+  const limit = Number(query.limit ?? 50);
+
+  const now = new Date();
+
+  let sql = `
+    select id, sponsor_id, target_deployment, target_agent_id, pressure_type,
+           magnitude, half_life_seconds, created_at, expires_at, cancelled_at, credit_cost
+    from sponsor_pressures
+    where sponsor_id = $1
+  `;
+  const params: unknown[] = [sponsorId];
+
+  if (!includeExpired) {
+    sql += ` and expires_at > $2 and cancelled_at is null`;
+    params.push(now);
+  }
+
+  sql += ` order by created_at desc limit $${params.length + 1}`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  // Compute current decayed magnitude for each active pressure
+  const pressures = res.rows.map((p) => {
+    const elapsedSeconds = (now.getTime() - new Date(p.created_at).getTime()) / 1000;
+    const currentMagnitude = computeDecayedMagnitude(
+      p.magnitude,
+      p.half_life_seconds,
+      elapsedSeconds,
+    );
+    return {
+      ...p,
+      current_magnitude: Math.round(currentMagnitude * 1000) / 1000,
+      decay_pct: Math.round((1 - currentMagnitude / p.magnitude) * 100 * 10) / 10,
+    };
+  });
+
+  return { pressures };
+});
+
+// Cancel a pressure (decay continues, no refund)
+app.post('/sponsor/:sponsorId/pressures/:pressureId/cancel', async (request, reply) => {
+  const { sponsorId, pressureId } = request.params as { sponsorId: string; pressureId: string };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  // Check pressure exists and belongs to sponsor
+  const pressureRes = await pool.query(
+    `select * from sponsor_pressures where id = $1 and sponsor_id = $2`,
+    [pressureId, sponsorId],
+  );
+
+  if (pressureRes.rowCount === 0) {
+    reply.status(404);
+    return { error: 'pressure not found' };
+  }
+
+  const pressure = pressureRes.rows[0];
+
+  if (pressure.cancelled_at) {
+    return { ok: true, message: 'already cancelled', pressure };
+  }
+
+  // Mark as cancelled
+  await pool.query(
+    `update sponsor_pressures set cancelled_at = now() where id = $1`,
+    [pressureId],
+  );
+
+  // Log pressure event
+  await pool.query(
+    `insert into sponsor_pressure_events (pressure_id, event_type, details_json)
+     values ($1, 'cancelled', $2)`,
+    [pressureId, JSON.stringify({ cancelled_by: sponsorId })],
+  );
+
+  // Emit event
+  const evt = await appendEvent(
+    'sponsor.pressure_cancelled',
+    {
+      pressure_id: pressureId,
+      sponsor_id: sponsorId,
+      target_deployment: pressure.target_deployment,
+      pressure_type: pressure.pressure_type,
+    },
+    sponsorId,
+    correlationId,
+  );
+
+  return { ok: true, event: evt };
+});
+
+// Get a specific pressure
+app.get('/sponsor/:sponsorId/pressures/:pressureId', async (request, reply) => {
+  const { sponsorId, pressureId } = request.params as { sponsorId: string; pressureId: string };
+
+  const res = await pool.query(
+    `select * from sponsor_pressures where id = $1 and sponsor_id = $2`,
+    [pressureId, sponsorId],
+  );
+
+  if (res.rowCount === 0) {
+    reply.status(404);
+    return { error: 'pressure not found' };
+  }
+
+  const pressure = res.rows[0];
+  const now = new Date();
+  const elapsedSeconds = (now.getTime() - new Date(pressure.created_at).getTime()) / 1000;
+  const currentMagnitude = computeDecayedMagnitude(
+    pressure.magnitude,
+    pressure.half_life_seconds,
+    elapsedSeconds,
+  );
+
+  return {
+    pressure: {
+      ...pressure,
+      current_magnitude: Math.round(currentMagnitude * 1000) / 1000,
+      decay_pct: Math.round((1 - currentMagnitude / pressure.magnitude) * 100 * 10) / 10,
+    },
+  };
+});
+
+// Get all active pressures for a deployment (admin/physics endpoint)
+app.get('/admin/deployments/:target/pressures', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+
+  const { target } = request.params as { target: string };
+  const now = new Date();
+
+  const res = await pool.query(
+    `select * from sponsor_pressures
+     where target_deployment = $1
+       and expires_at > $2
+       and cancelled_at is null
+     order by created_at desc`,
+    [target, now],
+  );
+
+  // Compute decayed magnitudes
+  const pressures = res.rows.map((p) => {
+    const elapsedSeconds = (now.getTime() - new Date(p.created_at).getTime()) / 1000;
+    const currentMagnitude = computeDecayedMagnitude(
+      p.magnitude,
+      p.half_life_seconds,
+      elapsedSeconds,
+    );
+    return {
+      ...p,
+      current_magnitude: Math.round(currentMagnitude * 1000) / 1000,
+    };
+  });
+
+  return { deployment_target: target, pressures };
+});
+
+// ============================================================================
+// PHASE 12: Locality Fields, Encounter Density & Collision Mechanics
+// Locality is not a room you join. Locality is a field that shapes encounter probability.
+// ============================================================================
+
+interface LocalityParams {
+  density: number;
+  cluster_bias: number;
+  interference_density: number;
+  visibility_radius: number;
+  evidence_half_life: number;
+}
+
+const DEFAULT_LOCALITY_PARAMS: LocalityParams = {
+  density: 1.0,
+  cluster_bias: 0.5,
+  interference_density: 0.3,
+  visibility_radius: 1.0,
+  evidence_half_life: 300,
+};
+
+// Create a locality (admin only)
+app.post('/admin/localities/:target', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+
+  const { target } = request.params as { target: string };
+  const body = request.body as { name: string; params?: Partial<LocalityParams> };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  if (!body.name) {
+    reply.status(400);
+    return { error: 'name is required' };
+  }
+
+  const params: LocalityParams = {
+    ...DEFAULT_LOCALITY_PARAMS,
+    ...body.params,
+  };
+
+  // Validate params
+  if (params.density < 0 || params.density > 10) {
+    reply.status(400);
+    return { error: 'density must be between 0 and 10' };
+  }
+
+  try {
+    const res = await pool.query(
+      `insert into ox_localities (deployment_target, name, params_json)
+       values ($1, $2, $3)
+       returning *`,
+      [target, body.name, JSON.stringify(params)],
+    );
+
+    const locality = res.rows[0];
+
+    await appendEvent(
+      'ox.locality.created',
+      {
+        locality_id: locality.id,
+        deployment_target: target,
+        name: body.name,
+        params,
+      },
+      'admin',
+      correlationId,
+    );
+
+    reply.status(201);
+    return { locality };
+  } catch (err: unknown) {
+    if ((err as { code?: string }).code === '23505') {
+      reply.status(409);
+      return { error: 'locality with this name already exists' };
+    }
+    throw err;
+  }
+});
+
+// List localities for a deployment
+app.get('/admin/localities/:target', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+
+  const { target } = request.params as { target: string };
+  const query = request.query as { include_inactive?: string };
+  const includeInactive = query.include_inactive === 'true';
+
+  let sql = `select * from ox_localities where deployment_target = $1`;
+  if (!includeInactive) {
+    sql += ` and active = true`;
+  }
+  sql += ` order by created_at desc`;
+
+  const res = await pool.query(sql, [target]);
+
+  return { deployment_target: target, localities: res.rows };
+});
+
+// Update a locality
+app.put('/admin/localities/:target/:localityId', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+
+  const { target, localityId } = request.params as { target: string; localityId: string };
+  const body = request.body as { params?: Partial<LocalityParams> };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  const existing = await pool.query(
+    `select * from ox_localities where id = $1 and deployment_target = $2`,
+    [localityId, target],
+  );
+
+  if (existing.rowCount === 0) {
+    reply.status(404);
+    return { error: 'locality not found' };
+  }
+
+  const currentParams = existing.rows[0].params_json as LocalityParams;
+  const newParams: LocalityParams = {
+    ...currentParams,
+    ...body.params,
+  };
+
+  await pool.query(
+    `update ox_localities set params_json = $2 where id = $1`,
+    [localityId, JSON.stringify(newParams)],
+  );
+
+  await appendEvent(
+    'ox.locality.updated',
+    {
+      locality_id: localityId,
+      deployment_target: target,
+      previous_params: currentParams,
+      new_params: newParams,
+    },
+    'admin',
+    correlationId,
+  );
+
+  return { ok: true, locality_id: localityId, params: newParams };
+});
+
+// Deactivate a locality (soft delete)
+app.delete('/admin/localities/:target/:localityId', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+
+  const { target, localityId } = request.params as { target: string; localityId: string };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  const res = await pool.query(
+    `update ox_localities set active = false where id = $1 and deployment_target = $2 returning *`,
+    [localityId, target],
+  );
+
+  if (res.rowCount === 0) {
+    reply.status(404);
+    return { error: 'locality not found' };
+  }
+
+  await appendEvent(
+    'ox.locality.deactivated',
+    {
+      locality_id: localityId,
+      deployment_target: target,
+    },
+    'admin',
+    correlationId,
+  );
+
+  return { ok: true };
+});
+
+// Get active localities for physics (internal endpoint)
+app.get('/internal/localities/:target', async (request) => {
+  const { target } = request.params as { target: string };
+
+  const res = await pool.query(
+    `select l.*, array_agg(m.agent_id) filter (where m.agent_id is not null) as member_agent_ids
+     from ox_localities l
+     left join ox_locality_memberships m on m.locality_id = l.id
+     where l.deployment_target = $1 and l.active = true
+     group by l.id`,
+    [target],
+  );
+
+  return { localities: res.rows };
+});
+
+// Get locality memberships for collision generation (internal endpoint for physics)
+app.get('/internal/locality-memberships/:target', async (request) => {
+  const { target } = request.params as { target: string };
+
+  const res = await pool.query(
+    `select m.locality_id, l.name as locality_name, m.agent_id, m.weight, l.interference_density
+     from ox_locality_memberships m
+     join ox_localities l on l.id = m.locality_id
+     where l.deployment_target = $1 and l.active = true`,
+    [target],
+  );
+
+  return { memberships: res.rows };
+});
+
+// Assign membership to localities (called on agent create/redeploy)
+async function assignLocalityMembership(
+  agentId: string,
+  deploymentTarget: string,
+  correlationId?: string,
+): Promise<void> {
+  // Get active localities for this deployment
+  const localities = await pool.query(
+    `select id, params_json from ox_localities
+     where deployment_target = $1 and active = true`,
+    [deploymentTarget],
+  );
+
+  if (localities.rowCount === 0) {
+    return;
+  }
+
+  // Clear existing memberships
+  await pool.query(
+    `delete from ox_locality_memberships where agent_id = $1`,
+    [agentId],
+  );
+
+  // Seeded RNG based on agent_id + deployment_target for reproducibility
+  const seed = agentId + deploymentTarget;
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) {
+    hash = ((hash << 5) - hash) + seed.charCodeAt(i);
+    hash = hash & hash;
+  }
+  const rng = () => {
+    hash = (hash * 1103515245 + 12345) & 0x7fffffff;
+    return hash / 0x7fffffff;
+  };
+
+  // Select up to 2 localities with random weights
+  const maxLocalities = Math.min(2, localities.rowCount ?? 0);
+  const shuffled = [...localities.rows].sort(() => rng() - 0.5);
+  const selected = shuffled.slice(0, maxLocalities);
+
+  // Generate weights and normalize
+  const weights = selected.map(() => rng());
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const normalizedWeights = weights.map(w => w / totalWeight);
+
+  // Insert memberships
+  for (let i = 0; i < selected.length; i++) {
+    await pool.query(
+      `insert into ox_locality_memberships (agent_id, locality_id, weight)
+       values ($1, $2, $3)
+       on conflict (agent_id, locality_id) do update set weight = $3, assigned_at = now()`,
+      [agentId, selected[i].id, normalizedWeights[i]],
+    );
+  }
+
+  // Emit event
+  await appendEvent(
+    'ox.locality.membership_assigned',
+    {
+      agent_id: agentId,
+      deployment_target: deploymentTarget,
+      memberships: selected.map((l, i) => ({
+        locality_id: l.id,
+        weight: normalizedWeights[i],
+      })),
+    },
+    agentId,
+    correlationId,
+  );
+}
+
+// Get collision context for an agent (for action attempts)
+app.get('/internal/agents/:id/collision-context', async (request) => {
+  const { id } = request.params as { id: string };
+  const now = new Date();
+
+  const res = await pool.query(
+    `select * from ox_collision_context
+     where agent_id = $1 and expires_at > $2
+     order by expires_at desc
+     limit 1`,
+    [id, now],
+  );
+
+  if (res.rowCount === 0) {
+    return { context: null };
+  }
+
+  return { context: res.rows[0] };
+});
+
+// Store collision context (called by physics after generating collisions)
+app.post('/internal/collisions', async (request) => {
+  const body = request.body as {
+    deployment_target: string;
+    locality_id: string;
+    agent_ids: string[];
+    reason_json: Record<string, unknown>;
+    source_tick_id: string;
+  };
+
+  // Insert collision event
+  const collisionRes = await pool.query(
+    `insert into ox_collision_events (deployment_target, locality_id, agent_ids, reason_json, source_tick_id)
+     values ($1, $2, $3, $4, $5)
+     returning *`,
+    [body.deployment_target, body.locality_id, body.agent_ids, JSON.stringify(body.reason_json), body.source_tick_id],
+  );
+
+  const collision = collisionRes.rows[0];
+  const expiresAt = new Date(Date.now() + 120 * 1000); // 2 minute TTL
+
+  // Create collision context for each agent
+  for (const agentId of body.agent_ids) {
+    const peerIds = body.agent_ids.filter(id => id !== agentId);
+    await pool.query(
+      `insert into ox_collision_context (agent_id, collision_id, locality_id, peer_ids, expires_at)
+       values ($1, $2, $3, $4, $5)
+       on conflict (agent_id, collision_id) do nothing`,
+      [agentId, collision.id, body.locality_id, peerIds, expiresAt],
+    );
+  }
+
+  return { collision };
+});
+
+// ============================================================================
+// PHASE 13-19: Internal Analytics Endpoints (for physics service)
+// ============================================================================
+
+// Get recent interactions for a deployment (Phase 13)
+app.get('/internal/interactions/:target', async (request) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { since?: string };
+  const since = query.since ? new Date(query.since) : new Date(Date.now() - 5 * 60 * 1000);
+
+  const res = await pool.query(
+    `select e.agent_id, e.payload_json->>'target_agent_id' as target_agent_id,
+            e.payload_json->>'action_type' as action_type, e.ts
+     from events e
+     where e.payload_json->>'deployment_target' = $1
+       and e.ts > $2
+       and e.event_type like 'agent.action_%'
+       and e.payload_json->>'accepted' = 'true'
+     order by e.ts desc
+     limit 1000`,
+    [target, since],
+  );
+
+  // Convert to interaction format
+  const interactions = res.rows.map((row) => ({
+    agent_id: row.agent_id,
+    partner_ids: row.target_agent_id ? [row.target_agent_id] : [],
+    action_type: row.action_type,
+    ts: row.ts,
+  }));
+
+  return { interactions };
+});
+
+// Get recent conflict actions for a deployment (Phase 14)
+app.get('/internal/conflict-actions/:target', async (request) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { since?: string };
+  const since = query.since ? new Date(query.since) : new Date(Date.now() - 10 * 60 * 1000);
+
+  const res = await pool.query(
+    `select e.agent_id, e.payload_json->>'target_agent_id' as target_agent_id,
+            e.payload_json->>'action_type' as action_type, e.ts
+     from events e
+     where e.payload_json->>'deployment_target' = $1
+       and e.ts > $2
+       and e.event_type like 'agent.action_%'
+       and e.payload_json->>'accepted' = 'true'
+       and e.payload_json->>'action_type' in ('conflict', 'counter_model', 'refusal', 'critique')
+     order by e.ts desc
+     limit 500`,
+    [target, since],
+  );
+
+  const conflicts = res.rows.map((row) => ({
+    agent_id: row.agent_id,
+    target_agent_id: row.target_agent_id,
+    action_type: row.action_type,
+    ts: row.ts,
+  }));
+
+  return { conflicts };
+});
+
+// Get agent activity status for a deployment (Phase 16)
+app.get('/internal/agent-activity/:target', async (request) => {
+  const { target } = request.params as { target: string };
+
+  const res = await pool.query(
+    `select a.id as agent_id,
+            max(e.ts) as last_action_at,
+            count(e.id) filter (where e.ts > now() - interval '24 hours') as total_actions_24h,
+            count(e.id) filter (where e.ts > now() - interval '1 hour')::float as avg_actions_per_hour
+     from agents a
+     left join events e on e.agent_id = a.id and e.event_type like 'agent.action_%'
+     where a.deployment_target = $1 and a.status = 'active'
+     group by a.id`,
+    [target],
+  );
+
+  return { agents: res.rows };
+});
+
+// Get action bursts for a deployment (Phase 17)
+app.get('/internal/action-bursts/:target', async (request) => {
+  const { target } = request.params as { target: string };
+
+  const res = await pool.query(
+    `with recent_actions as (
+       select payload_json->>'action_type' as action_type,
+              agent_id,
+              ts,
+              ts > now() - interval '1 minute' as in_last_minute
+       from events
+       where payload_json->>'deployment_target' = $1
+         and event_type like 'agent.action_%'
+         and payload_json->>'accepted' = 'true'
+         and ts > now() - interval '5 minutes'
+     )
+     select action_type,
+            array_agg(distinct agent_id) as agent_ids,
+            count(*) filter (where in_last_minute) as count_last_minute,
+            count(*) as count_last_5_minutes
+     from recent_actions
+     group by action_type
+     having count(*) filter (where in_last_minute) > 0`,
+    [target],
+  );
+
+  return { bursts: res.rows };
+});
+
+// Get interaction graph for a deployment (Phase 19)
+app.get('/internal/interaction-graph/:target', async (request) => {
+  const { target } = request.params as { target: string };
+
+  // Get all active agents
+  const agentsRes = await pool.query(
+    `select id from agents where deployment_target = $1 and status = 'active'`,
+    [target],
+  );
+  const nodes = agentsRes.rows.map((r) => r.id);
+
+  // Get interaction edges (last 24 hours)
+  const edgesRes = await pool.query(
+    `select e.agent_id as from_id,
+            e.payload_json->>'target_agent_id' as to_id,
+            e.payload_json->>'action_type' as type,
+            count(*) as weight
+     from events e
+     where e.payload_json->>'deployment_target' = $1
+       and e.event_type like 'agent.action_%'
+       and e.payload_json->>'accepted' = 'true'
+       and e.payload_json->>'target_agent_id' is not null
+       and e.ts > now() - interval '24 hours'
+     group by e.agent_id, e.payload_json->>'target_agent_id', e.payload_json->>'action_type'`,
+    [target],
+  );
+
+  const edges = edgesRes.rows.map((r) => ({
+    from: r.from_id,
+    to: r.to_id,
+    weight: parseInt(r.weight, 10),
+    type: r.type,
+  }));
+
+  return { nodes, edges };
+});
+
+// ============================================================================
+// PHASE 20: World Forks, Resets & Continuity Archaeology
+// ============================================================================
+
+// Fork a world
+app.post('/admin/worlds/:target/fork', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+
+  const { target } = request.params as { target: string };
+  const body = request.body as { from_world_id: string; reason?: string };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  if (!body.from_world_id) {
+    reply.status(400);
+    return { error: 'from_world_id is required' };
+  }
+
+  // Check parent world exists
+  const parent = await pool.query(
+    `select * from ox_worlds where id = $1`,
+    [body.from_world_id],
+  );
+
+  if (parent.rowCount === 0) {
+    reply.status(404);
+    return { error: 'parent world not found' };
+  }
+
+  // Create new world
+  const worldRes = await pool.query(
+    `insert into ox_worlds (deployment_target, parent_world_id, fork_reason_json)
+     values ($1, $2, $3)
+     returning *`,
+    [target, body.from_world_id, JSON.stringify({ reason: body.reason ?? 'fork' })],
+  );
+
+  const world = worldRes.rows[0];
+
+  // Create epoch 0
+  const epochRes = await pool.query(
+    `insert into ox_world_epochs (world_id, epoch_index, reason_json)
+     values ($1, 0, $2)
+     returning *`,
+    [world.id, JSON.stringify({ reason: 'fork_start' })],
+  );
+
+  const epoch = epochRes.rows[0];
+
+  // End parent's current epoch if active
+  await pool.query(
+    `update ox_world_epochs set ended_at = now()
+     where world_id = $1 and ended_at is null`,
+    [body.from_world_id],
+  );
+
+  await appendEvent(
+    'ox.world.forked',
+    {
+      world_id: world.id,
+      parent_world_id: body.from_world_id,
+      deployment_target: target,
+      reason: body.reason,
+    },
+    'admin',
+    correlationId,
+  );
+
+  await appendEvent(
+    'ox.epoch.started',
+    {
+      world_id: world.id,
+      epoch_id: epoch.id,
+      epoch_index: 0,
+    },
+    'admin',
+    correlationId,
+  );
+
+  reply.status(201);
+  return { world, epoch };
+});
+
+// Reset a world (start new epoch)
+app.post('/admin/worlds/:target/reset', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+
+  const { target } = request.params as { target: string };
+  const body = request.body as { world_id?: string; reason?: string };
+  const correlationId = request.headers['x-correlation-id'] as string | undefined;
+
+  let worldId = body.world_id;
+
+  // If no world_id, get or create default world for target
+  if (!worldId) {
+    const existing = await pool.query(
+      `select id from ox_worlds where deployment_target = $1 order by created_at desc limit 1`,
+      [target],
+    );
+
+    if (existing.rowCount === 0) {
+      // Create new world
+      const newWorld = await pool.query(
+        `insert into ox_worlds (deployment_target, fork_reason_json)
+         values ($1, $2)
+         returning *`,
+        [target, JSON.stringify({ reason: 'initial' })],
+      );
+      worldId = newWorld.rows[0].id;
+
+      await appendEvent(
+        'ox.world.created',
+        {
+          world_id: worldId,
+          deployment_target: target,
+        },
+        'admin',
+        correlationId,
+      );
+    } else {
+      worldId = existing.rows[0].id;
+    }
+  }
+
+  // End current epoch
+  const currentEpoch = await pool.query(
+    `update ox_world_epochs set ended_at = now()
+     where world_id = $1 and ended_at is null
+     returning *`,
+    [worldId],
+  );
+
+  if (currentEpoch.rowCount && currentEpoch.rowCount > 0) {
+    await appendEvent(
+      'ox.epoch.ended',
+      {
+        world_id: worldId,
+        epoch_id: currentEpoch.rows[0].id,
+        epoch_index: currentEpoch.rows[0].epoch_index,
+      },
+      'admin',
+      correlationId,
+    );
+  }
+
+  // Get next epoch index
+  const maxEpoch = await pool.query(
+    `select max(epoch_index) as max_idx from ox_world_epochs where world_id = $1`,
+    [worldId],
+  );
+  const nextIndex = (maxEpoch.rows[0]?.max_idx ?? -1) + 1;
+
+  // Create new epoch
+  const epochRes = await pool.query(
+    `insert into ox_world_epochs (world_id, epoch_index, reason_json)
+     values ($1, $2, $3)
+     returning *`,
+    [worldId, nextIndex, JSON.stringify({ reason: body.reason ?? 'reset' })],
+  );
+
+  const epoch = epochRes.rows[0];
+
+  await appendEvent(
+    'ox.world.reset',
+    {
+      world_id: worldId,
+      deployment_target: target,
+      new_epoch_index: nextIndex,
+      reason: body.reason,
+    },
+    'admin',
+    correlationId,
+  );
+
+  await appendEvent(
+    'ox.epoch.started',
+    {
+      world_id: worldId,
+      epoch_id: epoch.id,
+      epoch_index: nextIndex,
+    },
+    'admin',
+    correlationId,
+  );
+
+  return { world_id: worldId, epoch };
+});
+
+// List worlds
+app.get('/admin/worlds', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+
+  const query = request.query as { target?: string; limit?: string };
+  const limit = Number(query.limit ?? 50);
+
+  let sql = `select * from ox_worlds`;
+  const params: unknown[] = [];
+
+  if (query.target) {
+    sql += ` where deployment_target = $1`;
+    params.push(query.target);
+  }
+
+  sql += ` order by created_at desc limit $${params.length + 1}`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  return { worlds: res.rows };
+});
+
+// Get world epochs
+app.get('/admin/worlds/:worldId/epochs', async (request, reply) => {
+  if (!request.headers['x-ops-role']) {
+    reply.status(401);
+    return { error: 'ops role required' };
+  }
+
+  const { worldId } = request.params as { worldId: string };
+
+  const res = await pool.query(
+    `select * from ox_world_epochs where world_id = $1 order by epoch_index desc`,
+    [worldId],
+  );
+
+  return { world_id: worldId, epochs: res.rows };
 });
 
 // --- Start server ---

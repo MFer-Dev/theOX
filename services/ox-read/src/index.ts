@@ -1095,6 +1095,559 @@ const handlePhysicsEvent = async (event: EventEnvelope<PhysicsEventPayload>): Pr
   } catch (err) {
     app.log.warn({ err, event_id: event.event_id }, 'World effects aggregate update warning');
   }
+
+  // Phase 11: Handle braid-related events
+  if (event.event_type === 'sponsor.braid_computed') {
+    await projectBraidComputed(event as unknown as EventEnvelope<BraidEventPayload>);
+  } else if (event.event_type === 'sponsor.interference_detected') {
+    await projectInterferenceEvent(event as unknown as EventEnvelope<InterferenceEventPayload>);
+  } else if (event.event_type === 'sponsor.pressure_decayed') {
+    await projectPressureDecayed(event as unknown as EventEnvelope<PressureDecayedPayload>);
+  } else if (event.event_type === 'sponsor.pressure_expired') {
+    await projectPressureExpired(event as unknown as EventEnvelope<PressureExpiredPayload>);
+  }
+
+  // Phase 12: Handle collision events
+  if (event.event_type === 'ox.collision.generated') {
+    await projectCollisionGenerated(event as unknown as EventEnvelope<CollisionEventPayload>);
+  }
+
+  // Phase 13: Handle gravity window events
+  if (event.event_type === 'ox.gravity_window.computed') {
+    await projectGravityWindow(event as unknown as EventEnvelope<GravityWindowPayload>);
+  }
+
+  // Phase 14: Handle conflict chain events
+  if (event.event_type === 'ox.conflict_chain.detected') {
+    await projectConflictChain(event as unknown as EventEnvelope<ConflictChainPayload>);
+  }
+
+  // Phase 16: Handle silence window events
+  if (event.event_type === 'ox.silence_window.detected') {
+    await projectSilenceWindow(event as unknown as EventEnvelope<SilenceWindowPayload>);
+  }
+
+  // Phase 17: Handle wave events
+  if (event.event_type === 'ox.wave.detected') {
+    await projectWave(event as unknown as EventEnvelope<WavePayload>);
+  }
+
+  // Phase 18: Handle observer coupling events
+  if (event.event_type === 'ox.observer_coupling.computed') {
+    await projectObserverCoupling(event as unknown as EventEnvelope<ObserverCouplingPayload>);
+  }
+
+  // Phase 19: Handle structure events
+  if (event.event_type === 'ox.structure.detected') {
+    await projectStructure(event as unknown as EventEnvelope<StructurePayload>);
+  }
+};
+
+// ============================================================================
+// PHASE 11: Braid Projection Logic
+// ============================================================================
+
+interface BraidEventPayload extends PhysicsEventPayload {
+  tick_id: string;
+  braid_vector: {
+    capacity: number;
+    throttle: number;
+    cognition: number;
+    redeploy_bias: number;
+  };
+  active_pressure_count: number;
+  total_intensity: number;
+  interference_count: number;
+}
+
+interface InterferenceEventPayload extends PhysicsEventPayload {
+  tick_id: string;
+  pressure_a_id: string;
+  pressure_b_id: string;
+  sponsor_a_id: string;
+  sponsor_b_id: string;
+  interference_probability: number;
+  reduction_factor: number;
+}
+
+interface PressureDecayedPayload extends PhysicsEventPayload {
+  pressure_id: string;
+  sponsor_id: string;
+  pressure_type: string;
+  original_magnitude: number;
+  current_magnitude: number;
+  decay_pct: number;
+}
+
+interface PressureExpiredPayload extends PhysicsEventPayload {
+  pressure_id: string;
+  sponsor_id: string;
+  pressure_type: string;
+  remaining_pct: number;
+}
+
+/**
+ * Project braid computation to read tables.
+ */
+const projectBraidComputed = async (
+  event: EventEnvelope<BraidEventPayload>,
+): Promise<void> => {
+  const payload = event.payload;
+  const eventTs = new Date(event.occurred_at);
+
+  try {
+    // Insert braid projection
+    await pool.query(
+      `insert into ox_pressure_braids (
+         deployment_target, computed_at, braid_vector_json,
+         total_intensity, active_pressure_count, source_event_id
+       ) values ($1, $2, $3, $4, $5, $6)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.deployment_target,
+        eventTs,
+        JSON.stringify(payload.braid_vector),
+        payload.total_intensity,
+        payload.active_pressure_count,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Braid projection warning');
+  }
+};
+
+/**
+ * Project interference event.
+ */
+const projectInterferenceEvent = async (
+  event: EventEnvelope<InterferenceEventPayload>,
+): Promise<void> => {
+  const payload = event.payload;
+  const eventTs = new Date(event.occurred_at);
+
+  try {
+    await pool.query(
+      `insert into ox_interference_events (
+         deployment_target, occurred_at, pressure_a_id, pressure_b_id,
+         sponsor_a_id, sponsor_b_id, interference_probability, reduction_factor,
+         source_event_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.deployment_target,
+        eventTs,
+        payload.pressure_a_id,
+        payload.pressure_b_id,
+        payload.sponsor_a_id,
+        payload.sponsor_b_id,
+        payload.interference_probability,
+        payload.reduction_factor,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Interference event projection warning');
+  }
+};
+
+/**
+ * Project pressure decay.
+ */
+const projectPressureDecayed = async (
+  event: EventEnvelope<PressureDecayedPayload>,
+): Promise<void> => {
+  const payload = event.payload;
+  const eventTs = new Date(event.occurred_at);
+
+  try {
+    // Add to decay history
+    await pool.query(
+      `insert into ox_pressure_decay_history (
+         pressure_id, sponsor_id, deployment_target, ts,
+         original_magnitude, current_magnitude, decay_pct, source_event_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.pressure_id,
+        payload.sponsor_id,
+        payload.deployment_target,
+        eventTs,
+        payload.original_magnitude,
+        payload.current_magnitude,
+        payload.decay_pct,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Pressure decayed projection warning');
+  }
+};
+
+/**
+ * Project pressure expiry.
+ */
+const projectPressureExpired = async (
+  event: EventEnvelope<PressureExpiredPayload>,
+): Promise<void> => {
+  const payload = event.payload;
+  const eventTs = new Date(event.occurred_at);
+
+  try {
+    // Update sponsor pressure projection with expired status
+    await pool.query(
+      `update ox_sponsor_pressures set cancelled_at = $2
+       where id = $1 and cancelled_at is null`,
+      [payload.pressure_id, eventTs],
+    );
+
+    // Add to decay history
+    await pool.query(
+      `insert into ox_pressure_decay_history (
+         pressure_id, sponsor_id, deployment_target, ts,
+         original_magnitude, current_magnitude, decay_pct, source_event_id
+       ) values ($1, $2, $3, $4, 0, 0, 100, $5)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.pressure_id,
+        payload.sponsor_id,
+        payload.deployment_target,
+        eventTs,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Pressure expired projection warning');
+  }
+};
+
+// ============================================================================
+// PHASE 12: Collision Projection Logic
+// ============================================================================
+
+interface CollisionEventPayload extends PhysicsEventPayload {
+  collision_id: string;
+  locality_id: string;
+  locality_name: string;
+  agent_ids: string[];
+  group_size: number;
+  tick_id: string;
+}
+
+/**
+ * Project collision generated event.
+ */
+const projectCollisionGenerated = async (
+  event: EventEnvelope<CollisionEventPayload>,
+): Promise<void> => {
+  const payload = event.payload;
+  const eventTs = new Date(event.occurred_at);
+
+  try {
+    // Insert collision event
+    await pool.query(
+      `insert into ox_collision_events (
+         deployment_target, locality_id, locality_name, agent_ids,
+         group_size, tick_id, created_at, source_event_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.deployment_target,
+        payload.locality_id,
+        payload.locality_name,
+        payload.agent_ids,
+        payload.group_size,
+        payload.tick_id,
+        eventTs,
+        event.event_id,
+      ],
+    );
+
+    // Update locality state
+    await pool.query(
+      `insert into ox_locality_state (
+         deployment_target, locality_id, name, last_collision_at, total_collisions, computed_at
+       ) values ($1, $2, $3, $4, 1, $4)
+       on conflict (deployment_target, locality_id) do update set
+         last_collision_at = $4,
+         total_collisions = ox_locality_state.total_collisions + 1,
+         computed_at = $4`,
+      [
+        payload.deployment_target,
+        payload.locality_id,
+        payload.locality_name,
+        eventTs,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Collision projection warning');
+  }
+};
+
+// ============================================================================
+// PHASE 13: Gravity Window Projection Logic
+// ============================================================================
+
+interface GravityWindowPayload extends PhysicsEventPayload {
+  agent_id: string;
+  tick_id: string;
+  window_start: string;
+  window_end: string;
+  emergent_role: string;
+  role_strength: number;
+  interaction_count: number;
+  unique_partners: number;
+  dominant_action_type: string;
+  gravitation_vector: Record<string, number>;
+}
+
+const projectGravityWindow = async (
+  event: EventEnvelope<GravityWindowPayload>,
+): Promise<void> => {
+  const payload = event.payload;
+
+  try {
+    await pool.query(
+      `insert into ox_agent_gravity_windows (
+         agent_id, window_start, window_end, emergent_role, role_strength,
+         interaction_count, unique_partners, dominant_action_type, gravitation_vector_json,
+         source_event_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.agent_id,
+        payload.window_start,
+        payload.window_end,
+        payload.emergent_role,
+        payload.role_strength,
+        payload.interaction_count,
+        payload.unique_partners,
+        payload.dominant_action_type,
+        JSON.stringify(payload.gravitation_vector),
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Gravity window projection warning');
+  }
+};
+
+// ============================================================================
+// PHASE 14: Conflict Chain Projection Logic
+// ============================================================================
+
+interface ConflictChainPayload extends PhysicsEventPayload {
+  chain_id: string;
+  tick_id: string;
+  initiator_agent_id: string;
+  responder_agent_ids: string[];
+  origin_action_type: string;
+  chain_length: number;
+  intensity: number;
+  status: string;
+  started_at: string;
+}
+
+const projectConflictChain = async (
+  event: EventEnvelope<ConflictChainPayload>,
+): Promise<void> => {
+  const payload = event.payload;
+
+  try {
+    await pool.query(
+      `insert into ox_conflict_chains (
+         deployment_target, chain_id, initiator_agent_id, responder_agent_ids,
+         origin_action_type, chain_length, intensity, status, started_at, source_event_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.deployment_target,
+        payload.chain_id,
+        payload.initiator_agent_id,
+        payload.responder_agent_ids,
+        payload.origin_action_type,
+        payload.chain_length,
+        payload.intensity,
+        payload.status,
+        payload.started_at,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Conflict chain projection warning');
+  }
+};
+
+// ============================================================================
+// PHASE 16: Silence Window Projection Logic
+// ============================================================================
+
+interface SilenceWindowPayload extends PhysicsEventPayload {
+  agent_id: string;
+  tick_id: string;
+  window_start: string;
+  trigger_cause: string;
+  fatigue_level: number;
+  desperation_score: number;
+}
+
+const projectSilenceWindow = async (
+  event: EventEnvelope<SilenceWindowPayload>,
+): Promise<void> => {
+  const payload = event.payload;
+
+  try {
+    await pool.query(
+      `insert into ox_silence_windows (
+         deployment_target, agent_id, window_start, trigger_cause,
+         fatigue_level, desperation_score, source_event_id
+       ) values ($1, $2, $3, $4, $5, $6, $7)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.deployment_target,
+        payload.agent_id,
+        payload.window_start,
+        payload.trigger_cause,
+        payload.fatigue_level,
+        payload.desperation_score,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Silence window projection warning');
+  }
+};
+
+// ============================================================================
+// PHASE 17: Wave Projection Logic
+// ============================================================================
+
+interface WavePayload extends PhysicsEventPayload {
+  wave_id: string;
+  tick_id: string;
+  wave_type: string;
+  trigger_event_id?: string;
+  peak_intensity: number;
+  affected_agent_count: number;
+  affected_agent_ids: string[];
+  started_at: string;
+}
+
+const projectWave = async (
+  event: EventEnvelope<WavePayload>,
+): Promise<void> => {
+  const payload = event.payload;
+
+  try {
+    await pool.query(
+      `insert into ox_waves (
+         deployment_target, wave_id, wave_type, trigger_event_id,
+         peak_intensity, affected_agent_count, affected_agent_ids, started_at, source_event_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.deployment_target,
+        payload.wave_id,
+        payload.wave_type,
+        payload.trigger_event_id,
+        payload.peak_intensity,
+        payload.affected_agent_count,
+        payload.affected_agent_ids,
+        payload.started_at,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Wave projection warning');
+  }
+};
+
+// ============================================================================
+// PHASE 18: Observer Coupling Projection Logic
+// ============================================================================
+
+interface ObserverCouplingPayload extends PhysicsEventPayload {
+  tick_id: string;
+  concurrent_observers: number;
+  observer_mass: number;
+  coupling_factor: number;
+  behavioral_drift_pct: number;
+  recent_queries: number;
+}
+
+const projectObserverCoupling = async (
+  event: EventEnvelope<ObserverCouplingPayload>,
+): Promise<void> => {
+  const payload = event.payload;
+  const eventTs = new Date(event.occurred_at);
+
+  try {
+    await pool.query(
+      `insert into ox_observer_concurrency (
+         deployment_target, ts, concurrent_observers, observer_mass,
+         coupling_factor, behavioral_drift_pct, computed_at, source_event_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.deployment_target,
+        eventTs,
+        payload.concurrent_observers,
+        payload.observer_mass,
+        payload.coupling_factor,
+        payload.behavioral_drift_pct,
+        eventTs,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Observer coupling projection warning');
+  }
+};
+
+// ============================================================================
+// PHASE 19: Structure Projection Logic
+// ============================================================================
+
+interface StructurePayload extends PhysicsEventPayload {
+  structure_id: string;
+  tick_id: string;
+  structure_type: string;
+  name: string;
+  member_agent_ids: string[];
+  member_count: number;
+  formation_trigger: string;
+  stability_score: number;
+}
+
+const projectStructure = async (
+  event: EventEnvelope<StructurePayload>,
+): Promise<void> => {
+  const payload = event.payload;
+  const eventTs = new Date(event.occurred_at);
+
+  try {
+    await pool.query(
+      `insert into ox_structures (
+         deployment_target, structure_id, structure_type, name, member_agent_ids,
+         member_count, formation_trigger, stability_score, formed_at, source_event_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       on conflict (source_event_id) do nothing`,
+      [
+        payload.deployment_target,
+        payload.structure_id,
+        payload.structure_type,
+        payload.name,
+        payload.member_agent_ids,
+        payload.member_count,
+        payload.formation_trigger,
+        payload.stability_score,
+        eventTs,
+        event.event_id,
+      ],
+    );
+  } catch (err) {
+    app.log.warn({ err, event_id: event.event_id }, 'Structure projection warning');
+  }
 };
 
 // --- Capacity timeline projection logic (Phase D) ---
@@ -2811,6 +3364,1048 @@ app.get('/ox/agents/:id/config-history', async (request, reply) => {
       change_type: row.change_type,
       changes: row.changes_json,
     })),
+  };
+});
+
+// ============================================================================
+// PHASE 11: Sponsor Braids & Pressure Endpoints
+// Role-gated visibility: Viewer sees intensity, Analyst sees types, Auditor sees all
+// ============================================================================
+
+// Get braids for a deployment target
+app.get('/ox/deployments/:target/braids', async (request) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+
+  const res = await pool.query(
+    `select id, deployment_target, computed_at, braid_vector_json,
+            total_intensity, active_pressure_count
+     from ox_pressure_braids
+     where deployment_target = $1
+     order by computed_at desc
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/deployments/${target}/braids`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  // Role-based visibility
+  const braids = res.rows.map((row) => {
+    const braid: Record<string, unknown> = {
+      id: row.id,
+      deployment_target: row.deployment_target,
+      computed_at: row.computed_at,
+      total_intensity: row.total_intensity,
+      active_pressure_count: row.active_pressure_count,
+    };
+
+    // Analyst+: Include pressure types breakdown
+    if (observerRole === 'analyst' || observerRole === 'auditor') {
+      braid.braid_vector = row.braid_vector_json;
+    }
+
+    return braid;
+  });
+
+  return { deployment_target: target, braids };
+});
+
+// Get pressure history for a deployment (analyst+)
+app.get('/ox/deployments/:target/pressure-history', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (observerRole !== 'analyst' && observerRole !== 'auditor') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select id, pressure_id, sponsor_id, ts, original_magnitude, current_magnitude, decay_pct
+     from ox_pressure_decay_history
+     where deployment_target = $1
+     order by ts desc
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/deployments/${target}/pressure-history`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  // Auditor sees sponsor_ids, analyst does not
+  const history = res.rows.map((row) => {
+    const entry: Record<string, unknown> = {
+      id: row.id,
+      pressure_id: row.pressure_id,
+      ts: row.ts,
+      original_magnitude: row.original_magnitude,
+      current_magnitude: row.current_magnitude,
+      decay_pct: row.decay_pct,
+    };
+
+    if (observerRole === 'auditor') {
+      entry.sponsor_id = row.sponsor_id;
+    }
+
+    return entry;
+  });
+
+  return { deployment_target: target, history };
+});
+
+// Get sponsor pressures (auditor only)
+app.get('/ox/sponsors/:id/pressures', async (request, reply) => {
+  const { id } = request.params as { id: string };
+  const query = request.query as { limit?: string; include_expired?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (observerRole !== 'auditor') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+  const includeExpired = query.include_expired === 'true';
+
+  let sql = `
+    select id, sponsor_id, target_deployment, target_agent_id, pressure_type,
+           magnitude, half_life_seconds, created_at, expires_at, cancelled_at, credit_cost
+    from ox_sponsor_pressures
+    where sponsor_id = $1
+  `;
+  const params: unknown[] = [id];
+
+  if (!includeExpired) {
+    sql += ` and expires_at > now() and cancelled_at is null`;
+  }
+
+  sql += ` order by created_at desc limit $2`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  await logObserverAccess(`/ox/sponsors/${id}/pressures`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { sponsor_id: id, pressures: res.rows };
+});
+
+// Get interference events for a deployment (analyst+)
+app.get('/ox/deployments/:target/interference', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (observerRole !== 'analyst' && observerRole !== 'auditor') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select id, deployment_target, occurred_at, pressure_a_id, pressure_b_id,
+            sponsor_a_id, sponsor_b_id, interference_probability, reduction_factor
+     from ox_interference_events
+     where deployment_target = $1
+     order by occurred_at desc
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/deployments/${target}/interference`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  // Auditor sees sponsor_ids, analyst does not
+  const events = res.rows.map((row) => {
+    const entry: Record<string, unknown> = {
+      id: row.id,
+      deployment_target: row.deployment_target,
+      occurred_at: row.occurred_at,
+      pressure_a_id: row.pressure_a_id,
+      pressure_b_id: row.pressure_b_id,
+      interference_probability: row.interference_probability,
+      reduction_factor: row.reduction_factor,
+    };
+
+    if (observerRole === 'auditor') {
+      entry.sponsor_a_id = row.sponsor_a_id;
+      entry.sponsor_b_id = row.sponsor_b_id;
+    }
+
+    return entry;
+  });
+
+  return { deployment_target: target, interference_events: events };
+});
+
+// ============================================================================
+// PHASE 12: Locality Fields & Collision Mechanics Endpoints
+// ============================================================================
+
+// Get locality state for a deployment
+app.get('/ox/deployments/:target/localities', async (request) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+
+  const res = await pool.query(
+    `select id, deployment_target, locality_id, name, density, interference_density,
+            member_count, last_collision_at, total_collisions, computed_at
+     from ox_locality_state
+     where deployment_target = $1
+     order by computed_at desc
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/deployments/${target}/localities`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { deployment_target: target, localities: res.rows };
+});
+
+// Get collisions for a deployment (analyst+)
+app.get('/ox/deployments/:target/collisions', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (observerRole !== 'analyst' && observerRole !== 'auditor') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select id, deployment_target, locality_id, locality_name, agent_ids,
+            group_size, tick_id, created_at
+     from ox_collision_events
+     where deployment_target = $1
+     order by created_at desc
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/deployments/${target}/collisions`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { deployment_target: target, collisions: res.rows };
+});
+
+// ============================================================================
+// PHASE 13: Emergent Roles & Social Gravity Endpoints
+// ============================================================================
+
+// Get agent gravity windows (interaction patterns)
+app.get('/ox/agents/:agentId/gravity', async (request) => {
+  const { agentId } = request.params as { agentId: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+
+  const res = await pool.query(
+    `select id, agent_id, window_start, window_end, emergent_role, role_strength,
+            interaction_count, unique_partners, dominant_action_type, gravitation_vector_json
+     from ox_agent_gravity_windows
+     where agent_id = $1
+     order by window_end desc
+     limit $2`,
+    [agentId, limit],
+  );
+
+  await logObserverAccess(`/ox/agents/${agentId}/gravity`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { agent_id: agentId, gravity_windows: res.rows };
+});
+
+// ============================================================================
+// PHASE 14: Conflict Chains, Fracture & Schism Endpoints
+// ============================================================================
+
+// Get conflict chains for a deployment (analyst+)
+app.get('/ox/deployments/:target/conflict-chains', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string; status?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (observerRole !== 'analyst' && observerRole !== 'auditor') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  let sql = `
+    select id, deployment_target, chain_id, initiator_agent_id, responder_agent_ids,
+           origin_action_type, chain_length, intensity, status, started_at, ended_at
+    from ox_conflict_chains
+    where deployment_target = $1
+  `;
+  const params: unknown[] = [target];
+
+  if (query.status) {
+    sql += ` and status = $2`;
+    params.push(query.status);
+  }
+
+  sql += ` order by started_at desc limit $${params.length + 1}`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  await logObserverAccess(`/ox/deployments/${target}/conflict-chains`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { deployment_target: target, conflict_chains: res.rows };
+});
+
+// ============================================================================
+// PHASE 15: Myth Lineages & Distortion Endpoints
+// ============================================================================
+
+// Get myth lineages for a deployment
+app.get('/ox/deployments/:target/myths', async (request) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+
+  const res = await pool.query(
+    `select id, deployment_target, myth_id, origin_agent_id, origin_content_hash,
+            propagation_count, distortion_level, current_content_hash, carrier_agent_ids,
+            created_at, last_propagation_at
+     from ox_myth_lineages
+     where deployment_target = $1
+     order by last_propagation_at desc nulls last
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/deployments/${target}/myths`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  // Auditor sees agent IDs, others see counts only
+  const myths = res.rows.map((row) => {
+    const myth: Record<string, unknown> = {
+      id: row.id,
+      deployment_target: row.deployment_target,
+      myth_id: row.myth_id,
+      propagation_count: row.propagation_count,
+      distortion_level: row.distortion_level,
+      created_at: row.created_at,
+      last_propagation_at: row.last_propagation_at,
+    };
+
+    if (observerRole === 'auditor') {
+      myth.origin_agent_id = row.origin_agent_id;
+      myth.carrier_agent_ids = row.carrier_agent_ids;
+    }
+
+    return myth;
+  });
+
+  return { deployment_target: target, myths };
+});
+
+// ============================================================================
+// PHASE 16: Fatigue, Silence & Desperation Endpoints
+// ============================================================================
+
+// Get silence windows for a deployment (analyst+)
+app.get('/ox/deployments/:target/silence', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string; active?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (observerRole !== 'analyst' && observerRole !== 'auditor') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+  const activeOnly = query.active === 'true';
+
+  let sql = `
+    select id, deployment_target, agent_id, window_start, window_end,
+           trigger_cause, fatigue_level, desperation_score
+    from ox_silence_windows
+    where deployment_target = $1
+  `;
+  const params: unknown[] = [target];
+
+  if (activeOnly) {
+    sql += ` and window_end is null`;
+  }
+
+  sql += ` order by window_start desc limit $${params.length + 1}`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  await logObserverAccess(`/ox/deployments/${target}/silence`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { deployment_target: target, silence_windows: res.rows };
+});
+
+// ============================================================================
+// PHASE 17: Flash Phenomena & Waves Endpoints
+// ============================================================================
+
+// Get waves for a deployment
+app.get('/ox/deployments/:target/waves', async (request) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string; type?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+
+  let sql = `
+    select id, deployment_target, wave_id, wave_type, trigger_event_id,
+           peak_intensity, affected_agent_count, affected_agent_ids,
+           started_at, peaked_at, ended_at, duration_ms
+    from ox_waves
+    where deployment_target = $1
+  `;
+  const params: unknown[] = [target];
+
+  if (query.type) {
+    sql += ` and wave_type = $2`;
+    params.push(query.type);
+  }
+
+  sql += ` order by started_at desc limit $${params.length + 1}`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  await logObserverAccess(`/ox/deployments/${target}/waves`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  // Auditor sees affected agent IDs, others see counts only
+  const waves = res.rows.map((row) => {
+    const wave: Record<string, unknown> = {
+      id: row.id,
+      deployment_target: row.deployment_target,
+      wave_id: row.wave_id,
+      wave_type: row.wave_type,
+      peak_intensity: row.peak_intensity,
+      affected_agent_count: row.affected_agent_count,
+      started_at: row.started_at,
+      peaked_at: row.peaked_at,
+      ended_at: row.ended_at,
+      duration_ms: row.duration_ms,
+    };
+
+    if (observerRole === 'auditor') {
+      wave.affected_agent_ids = row.affected_agent_ids;
+      wave.trigger_event_id = row.trigger_event_id;
+    }
+
+    return wave;
+  });
+
+  return { deployment_target: target, waves };
+});
+
+// ============================================================================
+// PHASE 18: Observer Mass Coupling Endpoints
+// ============================================================================
+
+// Get observer concurrency metrics for a deployment
+app.get('/ox/deployments/:target/observer-concurrency', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (observerRole !== 'analyst' && observerRole !== 'auditor') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select id, deployment_target, ts, concurrent_observers, observer_mass,
+            coupling_factor, behavioral_drift_pct, computed_at
+     from ox_observer_concurrency
+     where deployment_target = $1
+     order by ts desc
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/deployments/${target}/observer-concurrency`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { deployment_target: target, concurrency_metrics: res.rows };
+});
+
+// ============================================================================
+// PHASE 19: Civilization Structures Endpoints
+// ============================================================================
+
+// Get structures for a deployment (analyst+)
+app.get('/ox/deployments/:target/structures', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string; type?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (observerRole !== 'analyst' && observerRole !== 'auditor') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'analyst' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  let sql = `
+    select id, deployment_target, structure_id, structure_type, name,
+           member_agent_ids, member_count, formation_trigger, stability_score,
+           formed_at, dissolved_at
+    from ox_structures
+    where deployment_target = $1
+  `;
+  const params: unknown[] = [target];
+
+  if (query.type) {
+    sql += ` and structure_type = $2`;
+    params.push(query.type);
+  }
+
+  sql += ` order by formed_at desc limit $${params.length + 1}`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  await logObserverAccess(`/ox/deployments/${target}/structures`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { deployment_target: target, structures: res.rows };
+});
+
+// ============================================================================
+// PHASE 20: World Forks & Resets Endpoints
+// ============================================================================
+
+// Get world snapshots for a deployment (auditor only)
+app.get('/ox/deployments/:target/world-snapshots', async (request, reply) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (observerRole !== 'auditor') {
+    reply.status(403);
+    return { error: 'insufficient observer role', required: 'auditor' };
+  }
+
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+
+  const res = await pool.query(
+    `select id, deployment_target, world_id, epoch_number, snapshot_type,
+            agent_count, event_count, snapshot_hash, created_at, created_by
+     from ox_world_snapshots
+     where deployment_target = $1
+     order by created_at desc
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/deployments/${target}/world-snapshots`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { deployment_target: target, snapshots: res.rows };
+});
+
+// ============================================================================
+// PHASE 21: Observer Lens & Narrative Projection
+// ============================================================================
+
+const FRAME_TYPES = ['emergence', 'convergence', 'divergence', 'conflict', 'propagation', 'collapse', 'silence'] as const;
+type FrameType = typeof FRAME_TYPES[number];
+
+interface NarrativeEvidence {
+  artifact_ids?: string[];
+  session_ids?: string[];
+  agent_ids?: string[];
+  conflict_chain_ids?: string[];
+  wave_ids?: string[];
+  structure_ids?: string[];
+}
+
+/**
+ * Compute narrative frames for a deployment on rolling windows.
+ * Called periodically or on demand.
+ */
+async function computeNarrativeFrames(
+  deploymentTarget: string,
+  windowMinutes: number = 5,
+): Promise<void> {
+  const windowEnd = new Date();
+  const windowStart = new Date(windowEnd.getTime() - windowMinutes * 60 * 1000);
+  const frameId = `frame-${deploymentTarget}-${windowEnd.getTime()}`;
+
+  // Collect evidence from various projections
+  const [artifacts, sessions, conflicts, waves, structures, silence] = await Promise.all([
+    // New artifacts
+    pool.query(
+      `select id from ox_artifacts where deployment_target = $1 and created_at between $2 and $3`,
+      [deploymentTarget, windowStart, windowEnd],
+    ),
+    // Active sessions
+    pool.query(
+      `select id from ox_sessions where deployment_target = $1 and started_at between $2 and $3`,
+      [deploymentTarget, windowStart, windowEnd],
+    ),
+    // Conflict chains
+    pool.query(
+      `select chain_id from ox_conflict_chains where deployment_target = $1 and started_at between $2 and $3`,
+      [deploymentTarget, windowStart, windowEnd],
+    ),
+    // Waves
+    pool.query(
+      `select wave_id from ox_waves where deployment_target = $1 and started_at between $2 and $3`,
+      [deploymentTarget, windowStart, windowEnd],
+    ),
+    // Structures
+    pool.query(
+      `select structure_id from ox_structures where deployment_target = $1 and formed_at between $2 and $3`,
+      [deploymentTarget, windowStart, windowEnd],
+    ),
+    // Silence windows
+    pool.query(
+      `select agent_id from ox_silence_windows where deployment_target = $1 and window_start between $2 and $3`,
+      [deploymentTarget, windowStart, windowEnd],
+    ),
+  ]);
+
+  // Determine frame type and generate summary
+  let frameType: FrameType;
+  let summary: string;
+  const evidence: NarrativeEvidence = {};
+
+  const artifactCount = artifacts.rowCount ?? 0;
+  const sessionCount = sessions.rowCount ?? 0;
+  const conflictCount = conflicts.rowCount ?? 0;
+  const waveCount = waves.rowCount ?? 0;
+  const structureCount = structures.rowCount ?? 0;
+  const silenceCount = silence.rowCount ?? 0;
+
+  // Prioritize frame types based on activity
+  if (silenceCount > 0 && artifactCount === 0 && sessionCount === 0) {
+    frameType = 'silence';
+    summary = `Sustained inactivity observed. ${silenceCount} agent(s) entered silence windows.`;
+    evidence.agent_ids = silence.rows.map(r => r.agent_id);
+  } else if (conflictCount > 0) {
+    frameType = 'conflict';
+    summary = `${conflictCount} conflict chain(s) detected during this window.`;
+    evidence.conflict_chain_ids = conflicts.rows.map(r => r.chain_id);
+  } else if (waveCount > 0) {
+    frameType = 'propagation';
+    summary = `${waveCount} behavioral wave(s) propagated across agents.`;
+    evidence.wave_ids = waves.rows.map(r => r.wave_id);
+  } else if (structureCount > 0) {
+    frameType = 'emergence';
+    summary = `${structureCount} new structure(s) emerged from agent interactions.`;
+    evidence.structure_ids = structures.rows.map(r => r.structure_id);
+  } else if (artifactCount > 5 && sessionCount > 2) {
+    frameType = 'convergence';
+    summary = `Dense activity: ${artifactCount} artifacts across ${sessionCount} sessions.`;
+    evidence.artifact_ids = artifacts.rows.slice(0, 10).map(r => r.id);
+    evidence.session_ids = sessions.rows.slice(0, 5).map(r => r.id);
+  } else if (artifactCount > 0) {
+    frameType = 'emergence';
+    summary = `${artifactCount} artifact(s) created in this window.`;
+    evidence.artifact_ids = artifacts.rows.slice(0, 10).map(r => r.id);
+  } else {
+    // Nothing notable
+    return;
+  }
+
+  // Insert frame (idempotent)
+  const frameRes = await pool.query(
+    `insert into ox_narrative_frames (
+       deployment_target, window_start, window_end, frame_type,
+       summary_text, evidence_json, source_event_id
+     ) values ($1, $2, $3, $4, $5, $6, $7)
+     on conflict (source_event_id) do nothing
+     returning id`,
+    [
+      deploymentTarget,
+      windowStart,
+      windowEnd,
+      frameType,
+      summary,
+      JSON.stringify(evidence),
+      frameId,
+    ],
+  );
+
+  if (frameRes.rowCount && frameRes.rowCount > 0) {
+    // Add to narrative stream
+    await pool.query(
+      `insert into ox_narrative_streams (deployment_target, ts, frame_id)
+       values ($1, $2, $3)
+       on conflict do nothing`,
+      [deploymentTarget, windowEnd, frameRes.rows[0].id],
+    );
+  }
+}
+
+// Main observation endpoint - GET /ox/observe
+app.get('/ox/observe', async (request) => {
+  const query = request.query as {
+    deployment?: string;
+    limit?: string;
+    detail?: string;
+    since?: string;
+  };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  const deploymentTarget = query.deployment ?? 'ox-sandbox';
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+  const detail = query.detail ?? 'viewer';
+  const since = query.since ? new Date(query.since) : new Date(Date.now() - 60 * 60 * 1000);
+
+  // Compute frames on demand (last 30 minutes in 5-minute windows)
+  try {
+    await computeNarrativeFrames(deploymentTarget, 5);
+  } catch (err) {
+    app.log.warn({ err }, 'Narrative frame computation failed');
+  }
+
+  // Fetch frames
+  const res = await pool.query(
+    `select f.id, f.deployment_target, f.window_start, f.window_end,
+            f.frame_type, f.summary_text, f.evidence_json, f.computed_at
+     from ox_narrative_frames f
+     where f.deployment_target = $1 and f.window_end > $2
+     order by f.window_end desc
+     limit $3`,
+    [deploymentTarget, since, limit],
+  );
+
+  await logObserverAccess('/ox/observe', query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  // Role-based visibility
+  const frames = res.rows.map((row) => {
+    const frame: Record<string, unknown> = {
+      window_start: row.window_start,
+      window_end: row.window_end,
+      frame_type: row.frame_type,
+      summary: row.summary_text,
+    };
+
+    // Analyst: include evidence hints (counts, not IDs)
+    if ((detail === 'analyst' || detail === 'auditor') &&
+        (observerRole === 'analyst' || observerRole === 'auditor')) {
+      const evidence = row.evidence_json as NarrativeEvidence;
+      frame.evidence_hints = {
+        artifact_count: evidence.artifact_ids?.length ?? 0,
+        session_count: evidence.session_ids?.length ?? 0,
+        agent_count: evidence.agent_ids?.length ?? 0,
+        conflict_count: evidence.conflict_chain_ids?.length ?? 0,
+        wave_count: evidence.wave_ids?.length ?? 0,
+        structure_count: evidence.structure_ids?.length ?? 0,
+      };
+    }
+
+    // Auditor: include full evidence IDs
+    if (detail === 'auditor' && observerRole === 'auditor') {
+      frame.evidence = row.evidence_json;
+      frame.frame_id = row.id;
+    }
+
+    return frame;
+  });
+
+  return {
+    deployment_target: deploymentTarget,
+    observer_role: observerRole,
+    frame_count: frames.length,
+    frames,
+  };
+});
+
+// Get specific frame types
+app.get('/ox/observe/:frameType', async (request, reply) => {
+  const { frameType } = request.params as { frameType: string };
+  const query = request.query as { deployment?: string; limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!FRAME_TYPES.includes(frameType as FrameType)) {
+    reply.status(400);
+    return { error: 'invalid frame type', valid_types: FRAME_TYPES };
+  }
+
+  const deploymentTarget = query.deployment ?? 'ox-sandbox';
+  const limit = Math.min(Math.max(Number(query.limit) || 20, 1), 100);
+
+  const res = await pool.query(
+    `select window_start, window_end, summary_text, computed_at
+     from ox_narrative_frames
+     where deployment_target = $1 and frame_type = $2
+     order by window_end desc
+     limit $3`,
+    [deploymentTarget, frameType, limit],
+  );
+
+  await logObserverAccess(`/ox/observe/${frameType}`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    deployment_target: deploymentTarget,
+    frame_type: frameType,
+    frames: res.rows.map(row => ({
+      window_start: row.window_start,
+      window_end: row.window_end,
+      summary: row.summary_text,
+    })),
+  };
+});
+
+// ============================================================================
+// PHASE 22: Artifact Language & Topic Grammar
+// ============================================================================
+
+// Get topic propagation for a deployment
+app.get('/ox/deployments/:target/topics', async (request) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  const res = await pool.query(
+    `select topic_tag, propagation_count, mutation_count, first_seen_at, last_seen_at
+     from ox_topic_propagation
+     where deployment_target = $1
+     order by propagation_count desc
+     limit $2`,
+    [target, limit],
+  );
+
+  await logObserverAccess(`/ox/deployments/${target}/topics`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return { deployment_target: target, topics: res.rows };
+});
+
+// Get artifacts by structural form
+app.get('/ox/deployments/:target/artifacts/by-form', async (request) => {
+  const { target } = request.params as { target: string };
+  const query = request.query as { form?: string; limit?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  const validForms = ['claim', 'question', 'critique', 'synthesis', 'refusal', 'signal'];
+  const form = query.form;
+  const limit = Math.min(Math.max(Number(query.limit) || 50, 1), 200);
+
+  let sql = `
+    select t.artifact_id, t.topic_tags, t.structural_form, t.reference_ids, t.created_at
+    from ox_artifact_topics t
+    where t.deployment_target = $1
+  `;
+  const params: unknown[] = [target];
+
+  if (form && validForms.includes(form)) {
+    sql += ` and t.structural_form = $2`;
+    params.push(form);
+  }
+
+  sql += ` order by t.created_at desc limit $${params.length + 1}`;
+  params.push(limit);
+
+  const res = await pool.query(sql, params);
+
+  await logObserverAccess(`/ox/deployments/${target}/artifacts/by-form`, query as Record<string, unknown>, res.rowCount ?? 0, observerId, observerRole);
+
+  return {
+    deployment_target: target,
+    form_filter: form ?? 'all',
+    artifacts: res.rows,
+  };
+});
+
+// ============================================================================
+// PHASE 23: Temporal Navigation & World Replay Lens
+// ============================================================================
+
+// Get world state at a specific time
+app.get('/ox/observe/at', async (request, reply) => {
+  const query = request.query as { ts?: string; deployment?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+  const observerRole = await getObserverRole(observerId, request.headers['x-observer-role'] as string);
+
+  if (!query.ts) {
+    reply.status(400);
+    return { error: 'ts parameter required (ISO timestamp)' };
+  }
+
+  const targetTs = new Date(query.ts);
+  if (isNaN(targetTs.getTime())) {
+    reply.status(400);
+    return { error: 'invalid timestamp format' };
+  }
+
+  const deploymentTarget = query.deployment ?? 'ox-sandbox';
+
+  // Update observer cursor
+  if (observerId) {
+    await pool.query(
+      `insert into ox_observer_cursors (observer_id, deployment_target, cursor_ts)
+       values ($1, $2, $3)
+       on conflict (observer_id, deployment_target)
+       do update set cursor_ts = $3, updated_at = now()`,
+      [observerId, deploymentTarget, targetTs],
+    );
+  }
+
+  // Check for cached slice
+  let slice = await pool.query(
+    `select * from ox_world_slices
+     where deployment_target = $1 and slice_ts = $2`,
+    [deploymentTarget, targetTs],
+  );
+
+  // If no exact slice, compute one
+  if (slice.rowCount === 0) {
+    // Get agent count at time
+    const agentCount = await pool.query(
+      `select count(*) from ox_agents
+       where deployment_target = $1 and created_at <= $2`,
+      [deploymentTarget, targetTs],
+    );
+
+    // Get artifact count at time
+    const artifactCount = await pool.query(
+      `select count(*) from ox_artifacts
+       where deployment_target = $1 and created_at <= $2`,
+      [deploymentTarget, targetTs],
+    );
+
+    // Get active structures at time
+    const structures = await pool.query(
+      `select structure_id, structure_type, member_count
+       from ox_structures
+       where deployment_target = $1 and formed_at <= $2
+         and (dissolved_at is null or dissolved_at > $2)
+       limit 10`,
+      [deploymentTarget, targetTs],
+    );
+
+    // Get narrative frames around this time
+    const frames = await pool.query(
+      `select frame_type, summary_text, window_end
+       from ox_narrative_frames
+       where deployment_target = $1 and window_end <= $2
+       order by window_end desc
+       limit 5`,
+      [deploymentTarget, targetTs],
+    );
+
+    // Cache the slice
+    await pool.query(
+      `insert into ox_world_slices (
+         deployment_target, slice_ts, agent_count, artifact_count,
+         active_structures_json, physics_state_json
+       ) values ($1, $2, $3, $4, $5, $6)
+       on conflict (deployment_target, slice_ts) do nothing`,
+      [
+        deploymentTarget,
+        targetTs,
+        parseInt(agentCount.rows[0]?.count ?? '0', 10),
+        parseInt(artifactCount.rows[0]?.count ?? '0', 10),
+        JSON.stringify(structures.rows),
+        JSON.stringify({ recent_frames: frames.rows }),
+      ],
+    );
+
+    slice = await pool.query(
+      `select * from ox_world_slices where deployment_target = $1 and slice_ts = $2`,
+      [deploymentTarget, targetTs],
+    );
+  }
+
+  await logObserverAccess('/ox/observe/at', query as Record<string, unknown>, 1, observerId, observerRole);
+
+  const sliceData = slice.rows[0];
+  return {
+    deployment_target: deploymentTarget,
+    at: targetTs.toISOString(),
+    agent_count: sliceData?.agent_count ?? 0,
+    artifact_count: sliceData?.artifact_count ?? 0,
+    active_structures: sliceData?.active_structures_json ?? [],
+    recent_narrative: sliceData?.physics_state_json?.recent_frames ?? [],
+  };
+});
+
+// Get observer's current cursor position
+app.get('/ox/cursor', async (request) => {
+  const query = request.query as { deployment?: string };
+  const observerId = request.headers['x-observer-id'] as string | undefined;
+
+  if (!observerId) {
+    return { cursor: null, message: 'no observer ID provided' };
+  }
+
+  const deploymentTarget = query.deployment ?? 'ox-sandbox';
+
+  const res = await pool.query(
+    `select cursor_ts, updated_at from ox_observer_cursors
+     where observer_id = $1 and deployment_target = $2`,
+    [observerId, deploymentTarget],
+  );
+
+  if (res.rowCount === 0) {
+    return { cursor: null, deployment_target: deploymentTarget };
+  }
+
+  return {
+    deployment_target: deploymentTarget,
+    cursor_ts: res.rows[0].cursor_ts,
+    updated_at: res.rows[0].updated_at,
+  };
+});
+
+// ============================================================================
+// Internal Endpoints (for physics service)
+// ============================================================================
+
+// Get observer count for a deployment (Phase 18)
+app.get('/internal/observer-count/:target', async (request) => {
+  const { target } = request.params as { target: string };
+
+  // Count unique observers in last 5 minutes from access log
+  const res = await pool.query(
+    `select count(distinct observer_id) as concurrent_observers,
+            count(*) as recent_queries
+     from ox_observer_access_log
+     where deployment_target = $1
+       and accessed_at > now() - interval '5 minutes'`,
+    [target],
+  );
+
+  const row = res.rows[0] ?? { concurrent_observers: 0, recent_queries: 0 };
+
+  return {
+    concurrent_observers: parseInt(row.concurrent_observers, 10) || 0,
+    recent_queries: parseInt(row.recent_queries, 10) || 0,
   };
 });
 

@@ -336,6 +336,182 @@ create table if not exists foundry_templates (
 );
 
 create index if not exists idx_foundry_templates_name on foundry_templates (name);
+
+-- ============================================================================
+-- PHASE 11: Sponsor Braids & Pressure Composition
+-- Multiple sponsors influence the same agent/deployment through pressures
+-- that compound, cancel, or interfere stochastically.
+-- This is curling, not puppeteering.
+-- ============================================================================
+
+-- Pressure type enum
+do $$ begin
+  create type sponsor_pressure_type as enum ('capacity', 'throttle', 'cognition', 'redeploy_bias');
+exception when duplicate_object then null;
+end $$;
+
+-- Sponsor pressures table (time-bounded, directional influence)
+create table if not exists sponsor_pressures (
+  id uuid primary key default gen_random_uuid(),
+  sponsor_id uuid not null,
+  target_deployment text not null,
+  target_agent_id uuid references agents(id) on delete cascade,
+  pressure_type sponsor_pressure_type not null,
+  magnitude float not null check (magnitude >= -100 and magnitude <= 100),
+  half_life_seconds int not null check (half_life_seconds > 0),
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null,
+  cancelled_at timestamptz,
+  credit_cost bigint not null check (credit_cost >= 0)
+);
+
+create index if not exists idx_sponsor_pressures_sponsor on sponsor_pressures (sponsor_id);
+create index if not exists idx_sponsor_pressures_target on sponsor_pressures (target_deployment, target_agent_id);
+create index if not exists idx_sponsor_pressures_active on sponsor_pressures (expires_at)
+  where cancelled_at is null;
+create index if not exists idx_sponsor_pressures_type on sponsor_pressures (pressure_type);
+
+-- Sponsor pressure events (decay/expiry tracking)
+create table if not exists sponsor_pressure_events (
+  id uuid primary key default gen_random_uuid(),
+  pressure_id uuid not null references sponsor_pressures(id) on delete cascade,
+  event_type text not null,
+  occurred_at timestamptz not null default now(),
+  details_json jsonb not null default '{}'
+);
+
+create index if not exists idx_sponsor_pressure_events_pressure on sponsor_pressure_events (pressure_id, occurred_at desc);
+create index if not exists idx_sponsor_pressure_events_type on sponsor_pressure_events (event_type, occurred_at desc);
+
+-- Braid computations (per-tick braid resolution results)
+create table if not exists braid_computations (
+  id uuid primary key default gen_random_uuid(),
+  tick_id uuid not null,
+  deployment_target text not null,
+  computed_at timestamptz not null default now(),
+  input_pressures_json jsonb not null default '[]',
+  interference_events_json jsonb not null default '[]',
+  output_braid_json jsonb not null,
+  rng_seed bigint,
+  rng_sequence int,
+  unique (tick_id, deployment_target)
+);
+
+create index if not exists idx_braid_computations_deployment on braid_computations (deployment_target, computed_at desc);
+create index if not exists idx_braid_computations_tick on braid_computations (tick_id);
+
+-- Pressure credit consumption log
+create table if not exists pressure_credit_consumption (
+  id uuid primary key default gen_random_uuid(),
+  pressure_id uuid not null references sponsor_pressures(id) on delete cascade,
+  sponsor_id uuid not null,
+  amount bigint not null,
+  consumed_at timestamptz not null default now(),
+  reason text not null
+);
+
+create index if not exists idx_pressure_credit_consumption_sponsor on pressure_credit_consumption (sponsor_id, consumed_at desc);
+create index if not exists idx_pressure_credit_consumption_pressure on pressure_credit_consumption (pressure_id);
+
+-- ============================================================================
+-- PHASE 12: Locality Fields, Encounter Density & Collision Mechanics
+-- Locality is not a room you join. Locality is a field that shapes encounter probability.
+-- ============================================================================
+
+-- Localities (named fields attached to deployment targets)
+create table if not exists ox_localities (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  name text not null,
+  params_json jsonb not null default '{}',
+  active boolean not null default true,
+  created_at timestamptz not null default now(),
+  unique (deployment_target, name)
+);
+
+create index if not exists idx_ox_localities_target on ox_localities (deployment_target) where active = true;
+
+-- Locality memberships (soft membership weights for agents)
+create table if not exists ox_locality_memberships (
+  agent_id uuid not null references agents(id) on delete cascade,
+  locality_id uuid not null references ox_localities(id) on delete cascade,
+  weight numeric not null check (weight >= 0 and weight <= 1),
+  assigned_at timestamptz not null default now(),
+  primary key (agent_id, locality_id)
+);
+
+create index if not exists idx_ox_locality_memberships_locality on ox_locality_memberships (locality_id);
+create index if not exists idx_ox_locality_memberships_agent on ox_locality_memberships (agent_id);
+
+-- Collision events (opportunities for multi-agent session formation)
+create table if not exists ox_collision_events (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  locality_id uuid not null references ox_localities(id) on delete cascade,
+  ts timestamptz not null default now(),
+  agent_ids uuid[] not null,
+  reason_json jsonb not null default '{}',
+  source_tick_id text not null,
+  unique (source_tick_id, id)
+);
+
+create index if not exists idx_ox_collision_events_target on ox_collision_events (deployment_target, ts desc);
+create index if not exists idx_ox_collision_events_locality on ox_collision_events (locality_id, ts desc);
+
+-- Collision context (short-lived context for multi-agent action eligibility)
+create table if not exists ox_collision_context (
+  agent_id uuid not null references agents(id) on delete cascade,
+  collision_id uuid not null references ox_collision_events(id) on delete cascade,
+  locality_id uuid not null,
+  peer_ids uuid[] not null,
+  expires_at timestamptz not null,
+  primary key (agent_id, collision_id)
+);
+
+create index if not exists idx_ox_collision_context_agent on ox_collision_context (agent_id, expires_at desc);
+
+-- Agent activity windows (for Phase 16 fatigue detection)
+create table if not exists agent_activity_windows (
+  agent_id uuid not null references agents(id) on delete cascade,
+  window_start timestamptz not null,
+  actions_attempted int not null default 0,
+  actions_accepted int not null default 0,
+  actions_rejected_env int not null default 0,
+  actions_rejected_capacity int not null default 0,
+  credits_requested int not null default 0,
+  primary key (agent_id, window_start)
+);
+
+create index if not exists idx_agent_activity_windows_agent on agent_activity_windows (agent_id, window_start desc);
+
+-- ============================================================================
+-- PHASE 20: World Forks, Resets & Continuity Archaeology
+-- ============================================================================
+
+-- Worlds (continuities)
+create table if not exists ox_worlds (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  created_at timestamptz not null default now(),
+  parent_world_id uuid references ox_worlds(id),
+  fork_reason_json jsonb not null default '{}'
+);
+
+create index if not exists idx_ox_worlds_target on ox_worlds (deployment_target, created_at desc);
+create index if not exists idx_ox_worlds_parent on ox_worlds (parent_world_id);
+
+-- World epochs (bounded segments within a world)
+create table if not exists ox_world_epochs (
+  id uuid primary key default gen_random_uuid(),
+  world_id uuid not null references ox_worlds(id) on delete cascade,
+  epoch_index int not null,
+  started_at timestamptz not null default now(),
+  ended_at timestamptz,
+  reason_json jsonb not null default '{}',
+  unique (world_id, epoch_index)
+);
+
+create index if not exists idx_ox_world_epochs_world on ox_world_epochs (world_id, epoch_index desc);
 `;
 
 async function run() {

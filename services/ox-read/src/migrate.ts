@@ -442,6 +442,461 @@ create table if not exists ox_agent_config_history (
 
 create index if not exists ox_agent_config_history_agent_idx on ox_agent_config_history (agent_id, ts desc);
 create index if not exists ox_agent_config_history_type_idx on ox_agent_config_history (change_type, ts desc);
+
+-- ============================================================================
+-- PHASE 11: Sponsor Braids & Pressure Composition (read-only projections)
+-- Braids are computed compositions of all active pressures for a target.
+-- ============================================================================
+
+-- Pressure braids projection (per-deployment braid vectors)
+create table if not exists ox_pressure_braids (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  computed_at timestamptz not null,
+  braid_vector_json jsonb not null,
+  total_intensity float not null default 0,
+  active_pressure_count int not null default 0,
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_pressure_braids_deployment_idx on ox_pressure_braids (deployment_target, computed_at desc);
+create index if not exists ox_pressure_braids_computed_idx on ox_pressure_braids (computed_at desc);
+
+-- Pressure components projection (pressure-to-braid links for auditing)
+create table if not exists ox_pressure_components (
+  id uuid primary key default gen_random_uuid(),
+  braid_id uuid not null references ox_pressure_braids(id) on delete cascade,
+  pressure_id uuid not null,
+  sponsor_id uuid not null,
+  pressure_type text not null,
+  original_magnitude float not null,
+  decayed_magnitude float not null,
+  contribution float not null,
+  interfered boolean not null default false,
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_pressure_components_braid_idx on ox_pressure_components (braid_id);
+create index if not exists ox_pressure_components_sponsor_idx on ox_pressure_components (sponsor_id);
+create index if not exists ox_pressure_components_pressure_idx on ox_pressure_components (pressure_id);
+
+-- Pressure decay history projection (decay curves over time)
+create table if not exists ox_pressure_decay_history (
+  id uuid primary key default gen_random_uuid(),
+  pressure_id uuid not null,
+  sponsor_id uuid not null,
+  deployment_target text not null,
+  ts timestamptz not null,
+  original_magnitude float not null,
+  current_magnitude float not null,
+  decay_pct float not null,
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_pressure_decay_history_pressure_idx on ox_pressure_decay_history (pressure_id, ts desc);
+create index if not exists ox_pressure_decay_history_sponsor_idx on ox_pressure_decay_history (sponsor_id, ts desc);
+create index if not exists ox_pressure_decay_history_deployment_idx on ox_pressure_decay_history (deployment_target, ts desc);
+
+-- Sponsor pressure projections (for auditor view)
+create table if not exists ox_sponsor_pressures (
+  id uuid primary key,
+  sponsor_id uuid not null,
+  target_deployment text not null,
+  target_agent_id uuid,
+  pressure_type text not null,
+  magnitude float not null,
+  half_life_seconds int not null,
+  created_at timestamptz not null,
+  expires_at timestamptz not null,
+  cancelled_at timestamptz,
+  credit_cost bigint not null,
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_sponsor_pressures_sponsor_idx on ox_sponsor_pressures (sponsor_id);
+create index if not exists ox_sponsor_pressures_target_idx on ox_sponsor_pressures (target_deployment);
+create index if not exists ox_sponsor_pressures_active_idx on ox_sponsor_pressures (expires_at)
+  where cancelled_at is null;
+
+-- Interference events projection (for analysis)
+create table if not exists ox_interference_events (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  occurred_at timestamptz not null,
+  pressure_a_id uuid not null,
+  pressure_b_id uuid not null,
+  sponsor_a_id uuid not null,
+  sponsor_b_id uuid not null,
+  interference_probability float not null,
+  reduction_factor float not null,
+  source_event_id uuid not null unique
+);
+
+create index if not exists ox_interference_events_deployment_idx on ox_interference_events (deployment_target, occurred_at desc);
+create index if not exists ox_interference_events_occurred_idx on ox_interference_events (occurred_at desc);
+
+-- ============================================================================
+-- PHASE 12: Locality Fields & Collision Mechanics (projections)
+-- ============================================================================
+
+-- Locality state projection (current params snapshot)
+create table if not exists ox_locality_state (
+  deployment_target text not null,
+  locality_id uuid not null,
+  locality_name text not null,
+  ts timestamptz not null,
+  density numeric not null default 1.0,
+  cluster_bias numeric not null default 0.5,
+  interference_density numeric not null default 0.3,
+  visibility_radius numeric not null default 1.0,
+  evidence_half_life numeric not null default 300,
+  source_event_id uuid not null unique,
+  primary key (deployment_target, locality_id)
+);
+
+-- Locality encounters rolling 5m window
+create table if not exists ox_locality_encounters_5m (
+  deployment_target text not null,
+  locality_id uuid not null,
+  window_start timestamptz not null,
+  collisions int not null default 0,
+  unique_agents int not null default 0,
+  avg_group_size numeric not null default 0,
+  primary key (deployment_target, locality_id, window_start)
+);
+
+create index if not exists ox_locality_encounters_5m_window_idx on ox_locality_encounters_5m (window_start desc);
+
+-- ============================================================================
+-- PHASE 13: Emergent Roles & Social Gravity (projections)
+-- ============================================================================
+
+-- Agent gravity windows (behavioral metrics)
+create table if not exists ox_agent_gravity_windows (
+  agent_id uuid not null,
+  window_start timestamptz not null,
+  window_end timestamptz not null,
+  unique_peers int not null default 0,
+  sessions_initiated int not null default 0,
+  sessions_participated int not null default 0,
+  conflict_initiations int not null default 0,
+  bridge_score_proxy numeric not null default 0,
+  isolation_minutes int not null default 0,
+  mimic_actions int not null default 0,
+  notes_json jsonb not null default '{}',
+  primary key (agent_id, window_start)
+);
+
+create index if not exists ox_agent_gravity_windows_agent_idx on ox_agent_gravity_windows (agent_id, window_start desc);
+
+-- Emergent role descriptions
+create table if not exists ox_emergent_role_descriptions (
+  agent_id uuid not null,
+  window_start timestamptz not null,
+  role_json jsonb not null,
+  computed_at timestamptz not null default now(),
+  primary key (agent_id, window_start)
+);
+
+create index if not exists ox_emergent_role_descriptions_computed_idx on ox_emergent_role_descriptions (computed_at desc);
+
+-- ============================================================================
+-- PHASE 14: Conflict Chains, Fracture & Schism (projections)
+-- ============================================================================
+
+-- Conflict chains
+create table if not exists ox_conflict_chains (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  started_at timestamptz not null,
+  last_activity_at timestamptz not null,
+  agent_ids uuid[] not null,
+  trigger_session_id uuid,
+  status text not null default 'open',
+  summary_json jsonb not null default '{}'
+);
+
+create index if not exists ox_conflict_chains_target_idx on ox_conflict_chains (deployment_target, status, last_activity_at desc);
+
+-- Conflict chain links
+create table if not exists ox_conflict_chain_links (
+  chain_id uuid not null references ox_conflict_chains(id) on delete cascade,
+  session_id uuid not null,
+  ts timestamptz not null,
+  escalation_type text not null,
+  primary key (chain_id, session_id)
+);
+
+-- Fractures (group splits)
+create table if not exists ox_fractures (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  window_start timestamptz not null,
+  window_end timestamptz not null,
+  group_a_agents uuid[] not null,
+  group_b_agents uuid[] not null,
+  evidence_json jsonb not null default '{}'
+);
+
+create index if not exists ox_fractures_target_idx on ox_fractures (deployment_target, window_start desc);
+
+-- ============================================================================
+-- PHASE 15: Myth Lineages, Distortion & Propagation (projections)
+-- ============================================================================
+
+-- Myth lineages
+create table if not exists ox_myth_lineages (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  seed_artifact_id uuid not null,
+  created_at timestamptz not null default now(),
+  status text not null default 'active'
+);
+
+create index if not exists ox_myth_lineages_target_idx on ox_myth_lineages (deployment_target, status);
+
+-- Myth nodes (artifacts in lineage)
+create table if not exists ox_myth_nodes (
+  lineage_id uuid not null references ox_myth_lineages(id) on delete cascade,
+  artifact_id uuid not null,
+  parent_artifact_id uuid,
+  ts timestamptz not null,
+  mutation_delta numeric not null default 0,
+  locality_id uuid,
+  session_id uuid,
+  primary key (lineage_id, artifact_id)
+);
+
+create index if not exists ox_myth_nodes_lineage_idx on ox_myth_nodes (lineage_id, ts desc);
+
+-- Myth propagation windows
+create table if not exists ox_myth_propagation_windows (
+  lineage_id uuid not null references ox_myth_lineages(id) on delete cascade,
+  window_start timestamptz not null,
+  appearances int not null default 0,
+  unique_agents int not null default 0,
+  unique_localities int not null default 0,
+  half_life_estimate numeric,
+  primary key (lineage_id, window_start)
+);
+
+-- ============================================================================
+-- PHASE 16: Fatigue, Silence, Desperation Signals (projections)
+-- ============================================================================
+
+-- Silence windows
+create table if not exists ox_silence_windows (
+  id uuid primary key default gen_random_uuid(),
+  agent_id uuid not null,
+  deployment_target text not null,
+  silence_start timestamptz not null,
+  silence_end timestamptz,
+  context_json jsonb not null default '{}'
+);
+
+create index if not exists ox_silence_windows_agent_idx on ox_silence_windows (agent_id, silence_start desc);
+create index if not exists ox_silence_windows_target_idx on ox_silence_windows (deployment_target, silence_start desc);
+
+-- Desperation signals
+create table if not exists ox_desperation_signals (
+  id uuid primary key default gen_random_uuid(),
+  agent_id uuid not null,
+  ts timestamptz not null default now(),
+  signal_type text not null,
+  evidence_json jsonb not null default '{}'
+);
+
+create index if not exists ox_desperation_signals_agent_idx on ox_desperation_signals (agent_id, ts desc);
+create index if not exists ox_desperation_signals_type_idx on ox_desperation_signals (signal_type, ts desc);
+
+-- ============================================================================
+-- PHASE 17: Flash Phenomena & Collective Waves (projections)
+-- ============================================================================
+
+-- Waves
+create table if not exists ox_waves (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  started_at timestamptz not null,
+  ended_at timestamptz,
+  wave_type text not null,
+  magnitude_json jsonb not null default '{}',
+  evidence_json jsonb not null default '{}'
+);
+
+create index if not exists ox_waves_target_idx on ox_waves (deployment_target, started_at desc);
+create index if not exists ox_waves_type_idx on ox_waves (wave_type, started_at desc);
+
+-- Wave participants
+create table if not exists ox_wave_participants (
+  wave_id uuid not null references ox_waves(id) on delete cascade,
+  agent_id uuid not null,
+  primary key (wave_id, agent_id)
+);
+
+-- ============================================================================
+-- PHASE 18: Observer Mass Coupling (projections)
+-- ============================================================================
+
+-- Observer concurrency
+create table if not exists ox_observer_concurrency (
+  deployment_target text not null,
+  ts timestamptz not null,
+  concurrent_viewers int not null default 0,
+  primary key (deployment_target, ts)
+);
+
+create index if not exists ox_observer_concurrency_ts_idx on ox_observer_concurrency (ts desc);
+
+-- Attention pressure history
+create table if not exists ox_attention_pressure_history (
+  deployment_target text not null,
+  ts timestamptz not null,
+  pressure_value numeric not null default 0,
+  source_json jsonb not null default '{}',
+  primary key (deployment_target, ts)
+);
+
+create index if not exists ox_attention_pressure_history_ts_idx on ox_attention_pressure_history (ts desc);
+
+-- ============================================================================
+-- PHASE 19: Civilization Structures (projections)
+-- ============================================================================
+
+-- Structures
+create table if not exists ox_structures (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  window_start timestamptz not null,
+  structure_type text not null,
+  description_json jsonb not null default '{}',
+  evidence_json jsonb not null default '{}'
+);
+
+create index if not exists ox_structures_target_idx on ox_structures (deployment_target, window_start desc);
+create index if not exists ox_structures_type_idx on ox_structures (structure_type, window_start desc);
+
+-- Structure members
+create table if not exists ox_structure_members (
+  structure_id uuid not null references ox_structures(id) on delete cascade,
+  agent_id uuid not null,
+  role_hint text,
+  primary key (structure_id, agent_id)
+);
+
+-- ============================================================================
+-- PHASE 20: World Forks, Resets & Continuity Archaeology (projections)
+-- ============================================================================
+
+-- World snapshots
+create table if not exists ox_world_snapshots (
+  id uuid primary key default gen_random_uuid(),
+  world_id uuid not null,
+  epoch_id uuid,
+  ts timestamptz not null default now(),
+  snapshot_json jsonb not null default '{}'
+);
+
+create index if not exists ox_world_snapshots_world_idx on ox_world_snapshots (world_id, ts desc);
+
+-- World archaeology
+create table if not exists ox_world_archaeology (
+  world_id uuid not null,
+  window_start timestamptz not null,
+  summary_json jsonb not null default '{}',
+  primary key (world_id, window_start)
+);
+
+-- ============================================================================
+-- PHASE 21: Narrative Frames & Observer Lens
+-- ============================================================================
+
+-- Narrative frames - deterministic textual descriptions from events
+create table if not exists ox_narrative_frames (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  window_start timestamptz not null,
+  window_end timestamptz not null,
+  frame_type text not null check (frame_type in ('emergence', 'convergence', 'divergence', 'conflict', 'propagation', 'collapse', 'silence')),
+  summary_text text not null,
+  evidence_json jsonb not null default '{}',
+  computed_at timestamptz not null default now(),
+  source_event_id text unique
+);
+
+create index if not exists ox_narrative_frames_deploy_idx on ox_narrative_frames (deployment_target, window_end desc);
+create index if not exists ox_narrative_frames_type_idx on ox_narrative_frames (deployment_target, frame_type, window_end desc);
+
+-- Narrative streams - ordered frames for observation
+create table if not exists ox_narrative_streams (
+  deployment_target text not null,
+  ts timestamptz not null,
+  frame_id uuid not null references ox_narrative_frames(id),
+  primary key (deployment_target, ts, frame_id)
+);
+
+-- ============================================================================
+-- PHASE 22: Artifact Language & Topic Grammar
+-- ============================================================================
+
+-- Artifact topic tracking
+create table if not exists ox_artifact_topics (
+  id uuid primary key default gen_random_uuid(),
+  artifact_id uuid not null,
+  deployment_target text not null,
+  topic_tags text[] not null default '{}',
+  structural_form text not null check (structural_form in ('claim', 'question', 'critique', 'synthesis', 'refusal', 'signal')),
+  reference_ids uuid[] not null default '{}',
+  created_at timestamptz not null default now(),
+  source_event_id text unique
+);
+
+create index if not exists ox_artifact_topics_artifact_idx on ox_artifact_topics (artifact_id);
+create index if not exists ox_artifact_topics_deploy_idx on ox_artifact_topics (deployment_target, created_at desc);
+create index if not exists ox_artifact_topics_tags_idx on ox_artifact_topics using gin (topic_tags);
+
+-- Topic propagation tracking
+create table if not exists ox_topic_propagation (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  topic_tag text not null,
+  origin_artifact_id uuid not null,
+  propagation_count int not null default 1,
+  mutation_count int not null default 0,
+  carrier_artifact_ids uuid[] not null default '{}',
+  first_seen_at timestamptz not null,
+  last_seen_at timestamptz not null,
+  source_event_id text unique
+);
+
+create index if not exists ox_topic_propagation_deploy_idx on ox_topic_propagation (deployment_target, topic_tag);
+
+-- ============================================================================
+-- PHASE 23: Temporal Navigation & World Replay Lens
+-- ============================================================================
+
+-- Time cursor positions for observers
+create table if not exists ox_observer_cursors (
+  observer_id text not null,
+  deployment_target text not null,
+  cursor_ts timestamptz not null,
+  updated_at timestamptz not null default now(),
+  primary key (observer_id, deployment_target)
+);
+
+-- World slices - cached snapshots at specific points
+create table if not exists ox_world_slices (
+  id uuid primary key default gen_random_uuid(),
+  deployment_target text not null,
+  slice_ts timestamptz not null,
+  agent_count int not null default 0,
+  artifact_count int not null default 0,
+  active_structures_json jsonb not null default '[]',
+  physics_state_json jsonb not null default '{}',
+  computed_at timestamptz not null default now()
+);
+
+create unique index if not exists ox_world_slices_deploy_ts_idx on ox_world_slices (deployment_target, slice_ts);
 `;
 
 async function run() {

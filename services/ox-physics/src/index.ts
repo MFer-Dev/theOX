@@ -437,6 +437,1128 @@ async function applyPhysicsToAgents(
   }
 }
 
+// ============================================================================
+// PHASE 11: Sponsor Braids & Pressure Composition
+// Multiple sponsors influence the same deployment through pressures.
+// This is curling, not puppeteering.
+// ============================================================================
+
+interface ActivePressure {
+  id: string;
+  sponsor_id: string;
+  target_deployment: string;
+  target_agent_id: string | null;
+  pressure_type: string;
+  magnitude: number;
+  half_life_seconds: number;
+  created_at: string;
+  expires_at: string;
+  current_magnitude: number;
+}
+
+interface BraidVector {
+  capacity: number;
+  throttle: number;
+  cognition: number;
+  redeploy_bias: number;
+}
+
+interface InterferenceEvent {
+  pressure_a_id: string;
+  pressure_b_id: string;
+  sponsor_a_id: string;
+  sponsor_b_id: string;
+  interference_probability: number;
+  reduction_factor: number;
+}
+
+interface BraidResult {
+  deployment_target: string;
+  braid_vector: BraidVector;
+  input_pressures: ActivePressure[];
+  interference_events: InterferenceEvent[];
+  total_intensity: number;
+  rng_state: { seed: bigint; sequence: number };
+}
+
+/**
+ * Compute decayed magnitude using exponential half-life decay.
+ * decayedMagnitude = magnitude * Math.pow(0.5, elapsedSeconds / halfLifeSeconds)
+ */
+function computeDecayedMagnitude(
+  magnitude: number,
+  halfLifeSeconds: number,
+  elapsedSeconds: number,
+): number {
+  return magnitude * Math.pow(0.5, elapsedSeconds / halfLifeSeconds);
+}
+
+/**
+ * Fetch active pressures for a deployment from the agents service.
+ */
+async function fetchActivePressures(deploymentTarget: string): Promise<ActivePressure[]> {
+  try {
+    const res = await fetch(
+      `${AGENTS_URL}/admin/deployments/${encodeURIComponent(deploymentTarget)}/pressures`,
+      {
+        headers: {
+          'x-ops-role': 'ox-physics',
+        },
+        signal: AbortSignal.timeout(5000),
+      },
+    );
+
+    if (!res.ok) {
+      app.log.warn({ deploymentTarget, status: res.status }, 'Failed to fetch pressures');
+      return [];
+    }
+
+    const data = (await res.json()) as { pressures: ActivePressure[] };
+    return data.pressures || [];
+  } catch (err) {
+    app.log.warn({ err, deploymentTarget }, 'Error fetching pressures');
+    return [];
+  }
+}
+
+/**
+ * Compute braid from active pressures using seeded RNG for interference resolution.
+ *
+ * Interference Resolution (Seeded RNG):
+ * - Opposite signs = potential interference
+ * - Probability based on magnitude ratio (max 50% chance)
+ * - Reduction between 10-70% when interference occurs
+ */
+async function computeBraid(
+  deploymentTarget: string,
+  pressures: ActivePressure[],
+  rng: SeededRNG,
+): Promise<BraidResult> {
+  const now = Date.now();
+  const interferenceEvents: InterferenceEvent[] = [];
+
+  // Group pressures by type
+  const byType: Record<string, ActivePressure[]> = {
+    capacity: [],
+    throttle: [],
+    cognition: [],
+    redeploy_bias: [],
+  };
+
+  for (const pressure of pressures) {
+    const elapsedSeconds = (now - new Date(pressure.created_at).getTime()) / 1000;
+    const currentMag = computeDecayedMagnitude(
+      pressure.magnitude,
+      pressure.half_life_seconds,
+      elapsedSeconds,
+    );
+
+    // Skip if effectively expired (< 1% remaining)
+    if (Math.abs(currentMag) < Math.abs(pressure.magnitude) * 0.01) {
+      continue;
+    }
+
+    pressure.current_magnitude = currentMag;
+    if (byType[pressure.pressure_type]) {
+      byType[pressure.pressure_type].push(pressure);
+    }
+  }
+
+  // Compute contributions with interference for each type
+  const braidVector: BraidVector = {
+    capacity: 0,
+    throttle: 0,
+    cognition: 0,
+    redeploy_bias: 0,
+  };
+
+  for (const [pressureType, typePressures] of Object.entries(byType)) {
+    const contributions: { pressure: ActivePressure; contribution: number }[] = [];
+
+    // Check for interference between opposing pressures
+    for (let i = 0; i < typePressures.length; i++) {
+      const pA = typePressures[i];
+      let contribution = pA.current_magnitude;
+
+      // Check against all other pressures for interference
+      for (let j = i + 1; j < typePressures.length; j++) {
+        const pB = typePressures[j];
+
+        // Opposite signs = potential interference
+        if (pA.current_magnitude * pB.current_magnitude < 0) {
+          const absA = Math.abs(pA.current_magnitude);
+          const absB = Math.abs(pB.current_magnitude);
+          const ratio = Math.min(absA, absB) / Math.max(absA, absB);
+          const interferenceProb = ratio * 0.5; // Max 50% chance
+
+          if (rng.chance(interferenceProb)) {
+            const reductionFactor = rng.range(0.3, 0.9); // 10-70% reduction
+
+            // Apply reduction to the pressure with smaller magnitude
+            if (absA < absB) {
+              contribution *= reductionFactor;
+            }
+
+            interferenceEvents.push({
+              pressure_a_id: pA.id,
+              pressure_b_id: pB.id,
+              sponsor_a_id: pA.sponsor_id,
+              sponsor_b_id: pB.sponsor_id,
+              interference_probability: interferenceProb,
+              reduction_factor: reductionFactor,
+            });
+          }
+        }
+      }
+
+      contributions.push({ pressure: pA, contribution });
+    }
+
+    // Sum contributions for this type
+    const typeTotal = contributions.reduce((sum, c) => sum + c.contribution, 0);
+    (braidVector as unknown as Record<string, number>)[pressureType] = typeTotal;
+  }
+
+  // Calculate total intensity (sum of absolute values)
+  const totalIntensity = Object.values(braidVector).reduce(
+    (sum, val) => sum + Math.abs(val),
+    0,
+  );
+
+  const rngState = rng.getState();
+
+  return {
+    deployment_target: deploymentTarget,
+    braid_vector: braidVector,
+    input_pressures: pressures.filter(p => p.current_magnitude !== undefined),
+    interference_events: interferenceEvents,
+    total_intensity: totalIntensity,
+    rng_state: rngState,
+  };
+}
+
+/**
+ * Apply braid effects to the physics state.
+ *
+ * Braid-to-Environment Mapping:
+ * - capacity: Modifies current_throughput_cap (additive)
+ * - throttle: Modifies current_throttle_factor (multiplicative)
+ * - cognition: Degrades current_cognition_availability (threshold)
+ * - redeploy_bias: Reserved for future use
+ */
+function applyBraidToPhysics(
+  state: Partial<DeploymentPhysics>,
+  braid: BraidVector,
+): Partial<DeploymentPhysics> {
+  const modified = { ...state };
+
+  // capacity: additive modifier to throughput cap
+  if (braid.capacity !== 0 && modified.current_throughput_cap !== undefined) {
+    modified.current_throughput_cap = Math.max(
+      1,
+      Math.min(10000, Math.round(modified.current_throughput_cap + braid.capacity)),
+    );
+  }
+
+  // throttle: multiplicative modifier (magnitude / 100 as multiplier)
+  if (braid.throttle !== 0 && modified.current_throttle_factor !== undefined) {
+    const multiplier = 1 + (braid.throttle / 100);
+    modified.current_throttle_factor = Math.max(
+      0.1,
+      Math.min(10, modified.current_throttle_factor * multiplier),
+    );
+    modified.current_throttle_factor = Math.round(modified.current_throttle_factor * 100) / 100;
+  }
+
+  // cognition: threshold-based degradation
+  if (braid.cognition !== 0) {
+    if (braid.cognition < -50) {
+      modified.current_cognition_availability = 'unavailable';
+    } else if (braid.cognition < -20) {
+      modified.current_cognition_availability = 'degraded';
+    }
+    // Positive values don't upgrade, only negative degrades
+  }
+
+  // redeploy_bias: Reserved for future use (not applied currently)
+
+  return modified;
+}
+
+/**
+ * Run braid resolution for a deployment.
+ */
+async function runBraidResolution(
+  deploymentTarget: string,
+  tickId: string,
+  correlationId: string,
+): Promise<BraidResult | null> {
+  // Fetch active pressures
+  const pressures = await fetchActivePressures(deploymentTarget);
+
+  if (pressures.length === 0) {
+    return null;
+  }
+
+  // Get RNG for this deployment
+  const rng = getRNG(deploymentTarget);
+
+  // Compute braid
+  const braidResult = await computeBraid(deploymentTarget, pressures, rng);
+
+  // Store braid computation
+  await pool.query(
+    `insert into ox_physics_events (
+       event_type, deployment_target, previous_state, new_state,
+       trigger_source, trigger_details, rng_seed, rng_sequence, correlation_id
+     ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [
+      'physics.braid_computed',
+      deploymentTarget,
+      JSON.stringify({ pressures: braidResult.input_pressures }),
+      JSON.stringify(braidResult.braid_vector),
+      'tick',
+      JSON.stringify({
+        tick_id: tickId,
+        interference_events: braidResult.interference_events,
+        total_intensity: braidResult.total_intensity,
+      }),
+      braidResult.rng_state.seed.toString(),
+      braidResult.rng_state.sequence,
+      correlationId,
+    ],
+  );
+
+  // Emit braid computed event
+  await appendEvent(
+    'sponsor.braid_computed',
+    {
+      deployment_target: deploymentTarget,
+      tick_id: tickId,
+      braid_vector: braidResult.braid_vector,
+      active_pressure_count: braidResult.input_pressures.length,
+      total_intensity: braidResult.total_intensity,
+      interference_count: braidResult.interference_events.length,
+    },
+    'ox-physics',
+    correlationId,
+  );
+
+  // Emit interference events
+  for (const interference of braidResult.interference_events) {
+    await appendEvent(
+      'sponsor.interference_detected',
+      {
+        deployment_target: deploymentTarget,
+        tick_id: tickId,
+        ...interference,
+      },
+      'ox-physics',
+      correlationId,
+    );
+  }
+
+  // Emit decay events for pressures that have decayed significantly (> 10% from original)
+  for (const pressure of braidResult.input_pressures) {
+    const remainingPct = Math.abs(pressure.current_magnitude) / Math.abs(pressure.magnitude);
+    const decayPct = 1 - remainingPct;
+
+    // Emit decayed event for significant decay (> 10%)
+    if (decayPct > 0.1 && remainingPct >= 0.01) {
+      await appendEvent(
+        'sponsor.pressure_decayed',
+        {
+          pressure_id: pressure.id,
+          sponsor_id: pressure.sponsor_id,
+          deployment_target: deploymentTarget,
+          pressure_type: pressure.pressure_type,
+          original_magnitude: pressure.magnitude,
+          current_magnitude: pressure.current_magnitude,
+          decay_pct: Math.round(decayPct * 100),
+        },
+        'ox-physics',
+        correlationId,
+      );
+    }
+
+    // Emit expired event when < 1% remaining
+    if (remainingPct < 0.01) {
+      await appendEvent(
+        'sponsor.pressure_expired',
+        {
+          pressure_id: pressure.id,
+          sponsor_id: pressure.sponsor_id,
+          deployment_target: deploymentTarget,
+          pressure_type: pressure.pressure_type,
+          remaining_pct: remainingPct,
+        },
+        'ox-physics',
+        correlationId,
+      );
+    }
+  }
+
+  return braidResult;
+}
+
+// ============================================================
+// Phase 12: Locality Fields & Collision Generation
+// ============================================================
+
+interface LocalityMembership {
+  locality_id: string;
+  locality_name: string;
+  agent_id: string;
+  weight: number;
+  interference_density: number;
+}
+
+interface CollisionCandidate {
+  agent_id: string;
+  weight: number;
+}
+
+/**
+ * Generate collision events for a deployment.
+ * Collisions are opportunities for multi-agent sessions.
+ */
+async function generateCollisions(
+  deploymentTarget: string,
+  tickId: string,
+  correlationId: string,
+): Promise<void> {
+  const rng = getRNG(deploymentTarget);
+
+  // Fetch localities from agents service
+  const localitiesRes = await fetch(`${AGENTS_URL}/admin/localities/${deploymentTarget}`, {
+    signal: AbortSignal.timeout(5000),
+  });
+
+  if (!localitiesRes.ok) {
+    app.log.debug({ deploymentTarget }, 'No localities configured, skipping collision generation');
+    return;
+  }
+
+  const { localities } = (await localitiesRes.json()) as {
+    localities: Array<{
+      id: string;
+      name: string;
+      density: number;
+      interference_density: number;
+    }>;
+  };
+
+  if (!localities || localities.length === 0) {
+    return;
+  }
+
+  // Fetch memberships from agents service
+  const membershipsRes = await fetch(`${AGENTS_URL}/internal/locality-memberships/${deploymentTarget}`, {
+    signal: AbortSignal.timeout(5000),
+  });
+
+  if (!membershipsRes.ok) {
+    app.log.debug({ deploymentTarget }, 'No locality memberships, skipping collision generation');
+    return;
+  }
+
+  const { memberships } = (await membershipsRes.json()) as {
+    memberships: LocalityMembership[];
+  };
+
+  if (!memberships || memberships.length === 0) {
+    return;
+  }
+
+  // Group memberships by locality
+  const membershipsByLocality = new Map<string, CollisionCandidate[]>();
+  const localityMetadata = new Map<string, { name: string; interference_density: number }>();
+
+  for (const m of memberships) {
+    if (!membershipsByLocality.has(m.locality_id)) {
+      membershipsByLocality.set(m.locality_id, []);
+      localityMetadata.set(m.locality_id, {
+        name: m.locality_name,
+        interference_density: m.interference_density,
+      });
+    }
+    membershipsByLocality.get(m.locality_id)!.push({
+      agent_id: m.agent_id,
+      weight: m.weight,
+    });
+  }
+
+  // Select locality weighted by density
+  const localityWeights = localities.map((l) => ({
+    id: l.id,
+    weight: l.density,
+  }));
+
+  const totalWeight = localityWeights.reduce((sum, l) => sum + l.weight, 0);
+  if (totalWeight === 0) {
+    return;
+  }
+
+  // Weighted selection
+  let roll = rng.next() * totalWeight;
+  let selectedLocality: string | null = null;
+
+  for (const l of localityWeights) {
+    roll -= l.weight;
+    if (roll <= 0) {
+      selectedLocality = l.id;
+      break;
+    }
+  }
+
+  if (!selectedLocality || !membershipsByLocality.has(selectedLocality)) {
+    return;
+  }
+
+  const candidates = membershipsByLocality.get(selectedLocality)!;
+  const metadata = localityMetadata.get(selectedLocality)!;
+
+  if (candidates.length < 2) {
+    // Need at least 2 agents for a collision
+    return;
+  }
+
+  // Determine group size based on interference_density
+  // Higher density = larger groups (2-5 agents)
+  const minSize = 2;
+  const maxSize = Math.min(5, candidates.length);
+  const densityFactor = metadata.interference_density / 100; // 0-1
+  const groupSize = Math.floor(minSize + (maxSize - minSize) * densityFactor * rng.next());
+  const finalGroupSize = Math.max(minSize, Math.min(groupSize, candidates.length));
+
+  // Sample agents proportional to membership weights
+  const selectedAgents: string[] = [];
+  const availableCandidates = [...candidates];
+
+  for (let i = 0; i < finalGroupSize && availableCandidates.length > 0; i++) {
+    const totalCandidateWeight = availableCandidates.reduce((sum, c) => sum + c.weight, 0);
+    let candidateRoll = rng.next() * totalCandidateWeight;
+
+    for (let j = 0; j < availableCandidates.length; j++) {
+      candidateRoll -= availableCandidates[j].weight;
+      if (candidateRoll <= 0) {
+        selectedAgents.push(availableCandidates[j].agent_id);
+        availableCandidates.splice(j, 1);
+        break;
+      }
+    }
+  }
+
+  if (selectedAgents.length < 2) {
+    return;
+  }
+
+  // Create collision via agents service
+  const collisionPayload = {
+    locality_id: selectedLocality,
+    agent_ids: selectedAgents,
+    tick_id: tickId,
+    correlation_id: correlationId,
+  };
+
+  const createRes = await fetch(`${AGENTS_URL}/internal/collisions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-correlation-id': correlationId,
+    },
+    body: JSON.stringify(collisionPayload),
+    signal: AbortSignal.timeout(5000),
+  });
+
+  if (!createRes.ok) {
+    const error = await createRes.text();
+    app.log.warn({ deploymentTarget, error }, 'Failed to create collision');
+    return;
+  }
+
+  const { collision } = (await createRes.json()) as {
+    collision: { id: string; locality_id: string; agent_ids: string[] };
+  };
+
+  // Emit collision event
+  await appendEvent(
+    'ox.collision.generated',
+    {
+      collision_id: collision.id,
+      deployment_target: deploymentTarget,
+      locality_id: selectedLocality,
+      locality_name: metadata.name,
+      agent_ids: selectedAgents,
+      group_size: selectedAgents.length,
+      tick_id: tickId,
+    },
+    'ox-physics',
+    correlationId,
+  );
+
+  // Store in physics events
+  await pool.query(
+    `insert into ox_physics_events (
+       event_type, deployment_target, previous_state, new_state,
+       trigger_source, trigger_details, rng_seed, rng_sequence, correlation_id
+     ) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [
+      'physics.collision_generated',
+      deploymentTarget,
+      JSON.stringify({ locality_id: selectedLocality }),
+      JSON.stringify({ collision_id: collision.id, agent_ids: selectedAgents }),
+      'tick',
+      JSON.stringify({ tick_id: tickId, group_size: selectedAgents.length }),
+      null,
+      null,
+      correlationId,
+    ],
+  );
+
+  app.log.info(
+    {
+      deploymentTarget,
+      collisionId: collision.id,
+      locality: metadata.name,
+      agentCount: selectedAgents.length,
+    },
+    'Collision generated',
+  );
+}
+
+// ============================================================
+// Phase 13: Emergent Roles & Social Gravity
+// ============================================================
+
+const EMERGENT_ROLES = ['hub', 'bridge', 'peripheral', 'isolate', 'catalyst'] as const;
+
+/**
+ * Compute gravity windows for agents based on recent interactions.
+ */
+async function computeGravityWindows(
+  deploymentTarget: string,
+  tickId: string,
+  correlationId: string,
+): Promise<void> {
+  // Fetch recent interactions (last 5 minutes)
+  const windowMs = 5 * 60 * 1000;
+  const windowStart = new Date(Date.now() - windowMs);
+
+  const interactionsRes = await fetch(
+    `${AGENTS_URL}/internal/interactions/${deploymentTarget}?since=${windowStart.toISOString()}`,
+    { signal: AbortSignal.timeout(5000) },
+  );
+
+  if (!interactionsRes.ok) {
+    return;
+  }
+
+  const { interactions } = (await interactionsRes.json()) as {
+    interactions: Array<{
+      agent_id: string;
+      partner_ids: string[];
+      action_type: string;
+      ts: string;
+    }>;
+  };
+
+  if (!interactions || interactions.length === 0) {
+    return;
+  }
+
+  // Aggregate interactions per agent
+  const agentStats = new Map<
+    string,
+    {
+      partners: Set<string>;
+      actionTypes: Map<string, number>;
+      totalInteractions: number;
+    }
+  >();
+
+  for (const interaction of interactions) {
+    let stats = agentStats.get(interaction.agent_id);
+    if (!stats) {
+      stats = {
+        partners: new Set(),
+        actionTypes: new Map(),
+        totalInteractions: 0,
+      };
+      agentStats.set(interaction.agent_id, stats);
+    }
+
+    for (const partner of interaction.partner_ids) {
+      stats.partners.add(partner);
+    }
+    stats.totalInteractions++;
+    const actionCount = stats.actionTypes.get(interaction.action_type) ?? 0;
+    stats.actionTypes.set(interaction.action_type, actionCount + 1);
+  }
+
+  // Compute gravity windows and emit events
+  for (const [agentId, stats] of agentStats) {
+    // Determine emergent role based on network position
+    const uniquePartners = stats.partners.size;
+    const totalInteractions = stats.totalInteractions;
+
+    let role: typeof EMERGENT_ROLES[number];
+    let strength: number;
+
+    if (uniquePartners >= 5 && totalInteractions >= 10) {
+      role = 'hub';
+      strength = Math.min(1.0, (uniquePartners + totalInteractions) / 30);
+    } else if (uniquePartners >= 3 && totalInteractions >= 5) {
+      role = 'bridge';
+      strength = Math.min(1.0, (uniquePartners + totalInteractions) / 20);
+    } else if (uniquePartners >= 2) {
+      role = 'catalyst';
+      strength = Math.min(1.0, totalInteractions / 10);
+    } else if (totalInteractions >= 1) {
+      role = 'peripheral';
+      strength = 0.3;
+    } else {
+      role = 'isolate';
+      strength = 0.1;
+    }
+
+    // Find dominant action type
+    let dominantType = 'communicate';
+    let maxCount = 0;
+    for (const [actionType, count] of stats.actionTypes) {
+      if (count > maxCount) {
+        maxCount = count;
+        dominantType = actionType;
+      }
+    }
+
+    // Gravitation vector (attraction/repulsion by action type)
+    const gravVector: Record<string, number> = {};
+    for (const [actionType, count] of stats.actionTypes) {
+      gravVector[actionType] = count / totalInteractions;
+    }
+
+    // Emit gravity window event
+    await appendEvent(
+      'ox.gravity_window.computed',
+      {
+        deployment_target: deploymentTarget,
+        agent_id: agentId,
+        tick_id: tickId,
+        window_start: windowStart.toISOString(),
+        window_end: new Date().toISOString(),
+        emergent_role: role,
+        role_strength: strength,
+        interaction_count: totalInteractions,
+        unique_partners: uniquePartners,
+        dominant_action_type: dominantType,
+        gravitation_vector: gravVector,
+      },
+      'ox-physics',
+      correlationId,
+    );
+  }
+}
+
+// ============================================================
+// Phase 14: Conflict Chains, Fracture & Schism
+// ============================================================
+
+/**
+ * Detect conflict chains - sequences of confrontational interactions.
+ */
+async function detectConflictChains(
+  deploymentTarget: string,
+  tickId: string,
+  correlationId: string,
+): Promise<void> {
+  // Fetch recent conflict actions (last 10 minutes)
+  const windowMs = 10 * 60 * 1000;
+  const since = new Date(Date.now() - windowMs);
+
+  const conflictsRes = await fetch(
+    `${AGENTS_URL}/internal/conflict-actions/${deploymentTarget}?since=${since.toISOString()}`,
+    { signal: AbortSignal.timeout(5000) },
+  );
+
+  if (!conflictsRes.ok) {
+    return;
+  }
+
+  const { conflicts } = (await conflictsRes.json()) as {
+    conflicts: Array<{
+      agent_id: string;
+      target_agent_id: string;
+      action_type: string;
+      ts: string;
+    }>;
+  };
+
+  if (!conflicts || conflicts.length < 2) {
+    return;
+  }
+
+  // Group by agent pairs and detect chains
+  const pairConflicts = new Map<string, typeof conflicts>();
+  for (const conflict of conflicts) {
+    const pairKey = [conflict.agent_id, conflict.target_agent_id].sort().join(':');
+    const existing = pairConflicts.get(pairKey) ?? [];
+    existing.push(conflict);
+    pairConflicts.set(pairKey, existing);
+  }
+
+  // Emit conflict chain events for pairs with >= 2 conflicts
+  for (const [pairKey, pairEvents] of pairConflicts) {
+    if (pairEvents.length >= 2) {
+      const agents = pairKey.split(':');
+      const chainId = `chain-${pairKey}-${Date.now()}`;
+      const intensity = Math.min(1.0, pairEvents.length / 5);
+
+      await appendEvent(
+        'ox.conflict_chain.detected',
+        {
+          deployment_target: deploymentTarget,
+          chain_id: chainId,
+          tick_id: tickId,
+          initiator_agent_id: agents[0],
+          responder_agent_ids: [agents[1]],
+          origin_action_type: pairEvents[0].action_type,
+          chain_length: pairEvents.length,
+          intensity,
+          status: 'active',
+          started_at: pairEvents[0].ts,
+        },
+        'ox-physics',
+        correlationId,
+      );
+    }
+  }
+}
+
+// ============================================================
+// Phase 16: Fatigue, Silence & Desperation
+// ============================================================
+
+/**
+ * Detect agents entering silence windows (no activity despite prior engagement).
+ */
+async function detectSilenceWindows(
+  deploymentTarget: string,
+  tickId: string,
+  correlationId: string,
+): Promise<void> {
+  // Fetch agent activity status
+  const activityRes = await fetch(
+    `${AGENTS_URL}/internal/agent-activity/${deploymentTarget}`,
+    { signal: AbortSignal.timeout(5000) },
+  );
+
+  if (!activityRes.ok) {
+    return;
+  }
+
+  const { agents } = (await activityRes.json()) as {
+    agents: Array<{
+      agent_id: string;
+      last_action_at: string | null;
+      total_actions_24h: number;
+      avg_actions_per_hour: number;
+    }>;
+  };
+
+  if (!agents) {
+    return;
+  }
+
+  const now = Date.now();
+  const silenceThresholdMs = 30 * 60 * 1000; // 30 minutes
+
+  for (const agent of agents) {
+    if (!agent.last_action_at) continue;
+
+    const lastActionTs = new Date(agent.last_action_at).getTime();
+    const silenceDuration = now - lastActionTs;
+
+    // Agent is in silence if:
+    // 1. They have historical activity (avg > 1 action/hour)
+    // 2. They haven't acted in > 30 minutes
+    if (agent.avg_actions_per_hour > 1 && silenceDuration > silenceThresholdMs) {
+      const fatigueLevel = Math.min(1.0, silenceDuration / (2 * 60 * 60 * 1000)); // Max at 2 hours
+      const desperationScore = agent.total_actions_24h > 50 ? fatigueLevel * 1.5 : fatigueLevel;
+
+      await appendEvent(
+        'ox.silence_window.detected',
+        {
+          deployment_target: deploymentTarget,
+          agent_id: agent.agent_id,
+          tick_id: tickId,
+          window_start: agent.last_action_at,
+          trigger_cause: 'inactivity',
+          fatigue_level: Math.round(fatigueLevel * 100) / 100,
+          desperation_score: Math.round(Math.min(1.0, desperationScore) * 100) / 100,
+        },
+        'ox-physics',
+        correlationId,
+      );
+    }
+  }
+}
+
+// ============================================================
+// Phase 17: Flash Phenomena & Waves
+// ============================================================
+
+/**
+ * Detect wave phenomena - rapid spreading of behaviors.
+ */
+async function detectWaves(
+  deploymentTarget: string,
+  tickId: string,
+  correlationId: string,
+): Promise<void> {
+  // Fetch recent action burst data
+  const burstRes = await fetch(
+    `${AGENTS_URL}/internal/action-bursts/${deploymentTarget}`,
+    { signal: AbortSignal.timeout(5000) },
+  );
+
+  if (!burstRes.ok) {
+    return;
+  }
+
+  const { bursts } = (await burstRes.json()) as {
+    bursts: Array<{
+      action_type: string;
+      agent_ids: string[];
+      count_last_minute: number;
+      count_last_5_minutes: number;
+      trigger_event_id?: string;
+    }>;
+  };
+
+  if (!bursts) {
+    return;
+  }
+
+  for (const burst of bursts) {
+    // Detect surge: 5x increase in last minute vs 5-minute average
+    const avgPerMinute = burst.count_last_5_minutes / 5;
+    const surgeRatio = burst.count_last_minute / Math.max(1, avgPerMinute);
+
+    if (surgeRatio >= 5 && burst.count_last_minute >= 3) {
+      const waveId = `wave-${burst.action_type}-${Date.now()}`;
+      const peakIntensity = Math.min(1.0, surgeRatio / 10);
+
+      await appendEvent(
+        'ox.wave.detected',
+        {
+          deployment_target: deploymentTarget,
+          wave_id: waveId,
+          tick_id: tickId,
+          wave_type: 'surge',
+          trigger_event_id: burst.trigger_event_id,
+          peak_intensity: Math.round(peakIntensity * 100) / 100,
+          affected_agent_count: burst.agent_ids.length,
+          affected_agent_ids: burst.agent_ids,
+          started_at: new Date().toISOString(),
+        },
+        'ox-physics',
+        correlationId,
+      );
+    }
+  }
+}
+
+// ============================================================
+// Phase 18: Observer Mass Coupling
+// ============================================================
+
+/**
+ * Compute observer concurrency and behavioral coupling effects.
+ */
+async function computeObserverCoupling(
+  deploymentTarget: string,
+  tickId: string,
+  correlationId: string,
+): Promise<void> {
+  // Fetch current observer count from ox-read
+  const OX_READ_URL = process.env.OX_READ_URL ?? 'http://localhost:4018';
+
+  const observerRes = await fetch(
+    `${OX_READ_URL}/internal/observer-count/${deploymentTarget}`,
+    { signal: AbortSignal.timeout(5000) },
+  );
+
+  if (!observerRes.ok) {
+    return;
+  }
+
+  const { concurrent_observers, recent_queries } = (await observerRes.json()) as {
+    concurrent_observers: number;
+    recent_queries: number;
+  };
+
+  if (concurrent_observers <= 0) {
+    return;
+  }
+
+  // Compute observer mass (logarithmic scale)
+  const observerMass = Math.log2(concurrent_observers + 1);
+
+  // Coupling factor increases with observer attention
+  const couplingFactor = Math.min(1.0, observerMass / 5);
+
+  // Behavioral drift - more observers = more "performance" behavior
+  const behavioralDrift = couplingFactor * 0.2; // Up to 20% drift
+
+  await appendEvent(
+    'ox.observer_coupling.computed',
+    {
+      deployment_target: deploymentTarget,
+      tick_id: tickId,
+      concurrent_observers: concurrent_observers,
+      observer_mass: Math.round(observerMass * 100) / 100,
+      coupling_factor: Math.round(couplingFactor * 100) / 100,
+      behavioral_drift_pct: Math.round(behavioralDrift * 100),
+      recent_queries: recent_queries,
+    },
+    'ox-physics',
+    correlationId,
+  );
+}
+
+// ============================================================
+// Phase 19: Civilization Structures
+// ============================================================
+
+const STRUCTURE_TYPES = ['alliance', 'faction', 'coalition', 'network', 'hierarchy'] as const;
+
+/**
+ * Detect emergent civilization structures from agent interactions.
+ */
+async function detectStructures(
+  deploymentTarget: string,
+  tickId: string,
+  correlationId: string,
+): Promise<void> {
+  // Fetch interaction graph
+  const graphRes = await fetch(
+    `${AGENTS_URL}/internal/interaction-graph/${deploymentTarget}`,
+    { signal: AbortSignal.timeout(5000) },
+  );
+
+  if (!graphRes.ok) {
+    return;
+  }
+
+  const { nodes, edges } = (await graphRes.json()) as {
+    nodes: string[];
+    edges: Array<{ from: string; to: string; weight: number; type: string }>;
+  };
+
+  if (!nodes || nodes.length < 3 || !edges || edges.length < 2) {
+    return;
+  }
+
+  // Simple community detection: find cliques of strongly connected nodes
+  const adjacency = new Map<string, Map<string, number>>();
+
+  for (const node of nodes) {
+    adjacency.set(node, new Map());
+  }
+
+  for (const edge of edges) {
+    const fromMap = adjacency.get(edge.from);
+    const toMap = adjacency.get(edge.to);
+    if (fromMap && toMap) {
+      fromMap.set(edge.to, (fromMap.get(edge.to) ?? 0) + edge.weight);
+      toMap.set(edge.from, (toMap.get(edge.from) ?? 0) + edge.weight);
+    }
+  }
+
+  // Find potential structures (nodes with >= 2 strong connections)
+  const strongConnections = new Map<string, string[]>();
+  const connectionThreshold = 3; // Minimum interaction weight
+
+  for (const [node, neighbors] of adjacency) {
+    const strongNeighbors = Array.from(neighbors.entries())
+      .filter(([, weight]) => weight >= connectionThreshold)
+      .map(([neighbor]) => neighbor);
+
+    if (strongNeighbors.length >= 2) {
+      strongConnections.set(node, strongNeighbors);
+    }
+  }
+
+  // Emit structure events for detected clusters
+  const visitedNodes = new Set<string>();
+
+  for (const [node, neighbors] of strongConnections) {
+    if (visitedNodes.has(node)) continue;
+
+    // Find connected component
+    const component = new Set<string>([node]);
+    const queue = [...neighbors];
+
+    while (queue.length > 0) {
+      const current = queue.shift()!;
+      if (component.has(current)) continue;
+      component.add(current);
+
+      const currentNeighbors = strongConnections.get(current);
+      if (currentNeighbors) {
+        for (const n of currentNeighbors) {
+          if (!component.has(n)) {
+            queue.push(n);
+          }
+        }
+      }
+    }
+
+    if (component.size >= 3) {
+      const members = Array.from(component);
+      const structureId = `struct-${deploymentTarget}-${Date.now()}`;
+
+      // Determine structure type based on connectivity pattern
+      const avgConnections = members.reduce(
+        (sum, m) => sum + (adjacency.get(m)?.size ?? 0),
+        0,
+      ) / members.length;
+
+      let structureType: typeof STRUCTURE_TYPES[number];
+      if (avgConnections >= 4) {
+        structureType = 'network';
+      } else if (avgConnections >= 3) {
+        structureType = 'coalition';
+      } else {
+        structureType = 'faction';
+      }
+
+      await appendEvent(
+        'ox.structure.detected',
+        {
+          deployment_target: deploymentTarget,
+          structure_id: structureId,
+          tick_id: tickId,
+          structure_type: structureType,
+          name: `${structureType}-${members.length}`,
+          member_agent_ids: members,
+          member_count: members.length,
+          formation_trigger: 'interaction_clustering',
+          stability_score: Math.min(1.0, avgConnections / 5),
+        },
+        'ox-physics',
+        correlationId,
+      );
+
+      // Mark as visited
+      for (const m of members) {
+        visitedNodes.add(m);
+      }
+    }
+  }
+}
+
 /**
  * Run physics tick for all deployments with due schedules.
  */
@@ -510,8 +1632,82 @@ async function runPhysicsTick(): Promise<void> {
           );
         }
 
+        // Phase 11: Run braid resolution and apply to physics
+        const tickId = `tick-${deploymentTarget}-${Date.now()}`;
+        let finalState = result.new_state;
+
+        try {
+          const braidResult = await runBraidResolution(deploymentTarget, tickId, correlationId);
+
+          if (braidResult && braidResult.total_intensity > 0) {
+            // Apply braid effects to physics state
+            finalState = applyBraidToPhysics(result.new_state, braidResult.braid_vector);
+
+            app.log.info(
+              {
+                deploymentTarget,
+                braid: braidResult.braid_vector,
+                pressureCount: braidResult.input_pressures.length,
+                interferenceCount: braidResult.interference_events.length,
+              },
+              'Braid applied to physics',
+            );
+          }
+        } catch (braidErr) {
+          app.log.warn({ err: braidErr, deploymentTarget }, 'Braid resolution failed, using base physics');
+        }
+
+        // Phase 12: Generate collisions
+        try {
+          await generateCollisions(deploymentTarget, tickId, correlationId);
+        } catch (collisionErr) {
+          app.log.warn({ err: collisionErr, deploymentTarget }, 'Collision generation failed');
+        }
+
+        // Phase 13: Compute gravity windows (emergent roles)
+        try {
+          await computeGravityWindows(deploymentTarget, tickId, correlationId);
+        } catch (gravityErr) {
+          app.log.warn({ err: gravityErr, deploymentTarget }, 'Gravity window computation failed');
+        }
+
+        // Phase 14: Detect conflict chains
+        try {
+          await detectConflictChains(deploymentTarget, tickId, correlationId);
+        } catch (conflictErr) {
+          app.log.warn({ err: conflictErr, deploymentTarget }, 'Conflict chain detection failed');
+        }
+
+        // Phase 16: Detect silence windows
+        try {
+          await detectSilenceWindows(deploymentTarget, tickId, correlationId);
+        } catch (silenceErr) {
+          app.log.warn({ err: silenceErr, deploymentTarget }, 'Silence detection failed');
+        }
+
+        // Phase 17: Detect waves
+        try {
+          await detectWaves(deploymentTarget, tickId, correlationId);
+        } catch (waveErr) {
+          app.log.warn({ err: waveErr, deploymentTarget }, 'Wave detection failed');
+        }
+
+        // Phase 18: Compute observer coupling
+        try {
+          await computeObserverCoupling(deploymentTarget, tickId, correlationId);
+        } catch (couplingErr) {
+          app.log.warn({ err: couplingErr, deploymentTarget }, 'Observer coupling computation failed');
+        }
+
+        // Phase 19: Detect structures
+        try {
+          await detectStructures(deploymentTarget, tickId, correlationId);
+        } catch (structureErr) {
+          app.log.warn({ err: structureErr, deploymentTarget }, 'Structure detection failed');
+        }
+
         // Apply to agents service
-        await applyPhysicsToAgents(deploymentTarget, result.new_state, correlationId);
+        await applyPhysicsToAgents(deploymentTarget, finalState, correlationId);
 
         app.log.info(
           { deploymentTarget, changes: result.changes, weather: result.new_state.weather_state },

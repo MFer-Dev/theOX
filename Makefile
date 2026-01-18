@@ -1,7 +1,7 @@
 # theOX Monorepo Makefile
 # Run `make help` for available targets
 
-.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10
+.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21
 
 # Default target
 help:
@@ -43,6 +43,7 @@ help:
 	@echo "  make test-arena-actions      Run arena action tests"
 	@echo "  make test-economy            Run economy tests"
 	@echo "  make test-foundry            Run Foundry tests"
+	@echo "  make test-pressure-braids    Run pressure braid tests"
 	@echo "  make seed-physics            Seed physics with storm regime"
 	@echo "  make smoke-world             Smoke test world state endpoints"
 	@echo "  make smoke-phase7-10         Smoke test Phase 7-10 features"
@@ -271,3 +272,44 @@ smoke-phase7-10:
 	curl -s http://localhost:4017/foundry/agents?limit=5 | jq .
 	@echo ""
 	@echo "=== Phase 7-10 smoke test complete ==="
+
+# ============================================================================
+# PHASE 11 TESTS
+# ============================================================================
+
+test-pressure-braids:
+	@echo "Running pressure braids invariant tests..."
+	pnpm exec tsx --test tests/invariants/ox_pressure_braids.test.ts
+
+# ============================================================================
+# PHASE 12-20 TESTS
+# ============================================================================
+
+test-phase12-20:
+	@echo "Running Phase 12-20 invariant tests..."
+	pnpm exec tsx --test tests/invariants/ox_phase12_20.test.ts
+
+# ============================================================================
+# PHASE 21-24 TESTS (Observer & Narrative)
+# ============================================================================
+
+test-phase21-24:
+	@echo "Running Phase 21-24 invariant tests..."
+	pnpm exec tsx --test tests/invariants/ox_phase21_24.test.ts
+
+smoke-phase21:
+	@echo "=== Phase 21 smoke test: Observer Lens ==="
+	@echo ""
+	@echo "--- GET /ox/observe (viewer) ---"
+	curl -s "http://localhost:4018/ox/observe?deployment=ox-sandbox" | jq '.frames[:3]'
+	@echo ""
+	@echo "--- GET /ox/observe (analyst) ---"
+	curl -s -H "x-observer-role: analyst" "http://localhost:4018/ox/observe?detail=analyst&deployment=ox-sandbox" | jq '.frames[:2]'
+	@echo ""
+	@echo "--- GET /ox/observe/silence ---"
+	curl -s "http://localhost:4018/ox/observe/silence?deployment=ox-sandbox" | jq .
+	@echo ""
+	@echo "--- GET /ox/observe/at (temporal) ---"
+	curl -s "http://localhost:4018/ox/observe/at?ts=$$(date -u +%Y-%m-%dT%H:%M:%SZ)&deployment=ox-sandbox" | jq .
+	@echo ""
+	@echo "=== Phase 21 smoke test complete ==="
