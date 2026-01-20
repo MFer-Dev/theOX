@@ -1,7 +1,7 @@
 # theOX Monorepo Makefile
 # Run `make help` for available targets
 
-.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21 test-chronicle smoke-chronicle
+.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21 test-chronicle smoke-chronicle seed-watchable dev\:arena smoke-arena
 
 # Default target
 help:
@@ -331,3 +331,35 @@ smoke-phase21:
 	curl -s "http://localhost:4018/ox/observe/at?ts=$$(date -u +%Y-%m-%dT%H:%M:%SZ)&deployment=ox-sandbox" | jq .
 	@echo ""
 	@echo "=== Phase 21 smoke test complete ==="
+
+# ============================================================================
+# ARENA VIEWER
+# ============================================================================
+
+seed-watchable:
+	@echo "=== Seeding Watchable Arena ==="
+	pnpm exec tsx scripts/seed/watchable.ts
+
+dev\:arena:
+	@echo "Starting Arena Viewer (ops-console)..."
+	pnpm --filter @apps/ops-console dev
+
+smoke-arena:
+	@echo "=== Arena smoke test ==="
+	@echo ""
+	@echo "--- Checking services ---"
+	curl -s http://localhost:4017/healthz | jq .
+	curl -s http://localhost:4018/healthz | jq .
+	@echo ""
+	@echo "--- GET /ox/chronicle ---"
+	curl -s "http://localhost:4018/ox/chronicle?deployment=ox-sandbox&limit=5" | jq .
+	@echo ""
+	@echo "--- GET /ox/sessions ---"
+	curl -s "http://localhost:4018/ox/sessions?limit=3" | jq .
+	@echo ""
+	@echo "--- GET /ox/world/ox-sandbox ---"
+	curl -s "http://localhost:4018/ox/world/ox-sandbox" | jq .
+	@echo ""
+	@echo "=== Arena smoke test complete ==="
+	@echo ""
+	@echo "Open http://localhost:3001/arena to view"
