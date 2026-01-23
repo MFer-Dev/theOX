@@ -1,0 +1,17 @@
+{
+  "name": "@workers/ox-audio-renderer",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint 'src/**/*.{ts,tsx}'",
+    "render": "tsx src/render-episode.ts"
+  },
+  "dependencies": {
+    "@platform/events": "workspace:*",
+    "@platform/shared": "workspace:*",
+    "fastify": "^4.28.1"
+  }
+}

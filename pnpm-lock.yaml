@@ -236,6 +236,9 @@ importers:
       uuid:
         specifier: ^9.0.1
         version: 9.0.1
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
     devDependencies:
       '@types/pg':
         specifier: ^8.11.11
@@ -805,6 +808,37 @@ importers:
       pg:
         specifier: ^8.12.0
         version: 8.16.3
+
+  workers/ox-audio-narrator:
+    dependencies:
+      '@platform/events':
+        specifier: workspace:*
+        version: link:../../platform/events
+      '@platform/shared':
+        specifier: workspace:*
+        version: link:../../platform/shared
+      fastify:
+        specifier: ^4.28.1
+        version: 4.29.1
+      uuid:
+        specifier: ^9.0.1
+        version: 9.0.1
+    devDependencies:
+      '@types/uuid':
+        specifier: ^9.0.7
+        version: 9.0.8
+
+  workers/ox-audio-renderer:
+    dependencies:
+      '@platform/events':
+        specifier: workspace:*
+        version: link:../../platform/events
+      '@platform/shared':
+        specifier: workspace:*
+        version: link:../../platform/shared
+      fastify:
+        specifier: ^4.28.1
+        version: 4.29.1
 
 packages:
 
@@ -7327,6 +7361,9 @@ packages:
   yocto-queue@0.1.0:
     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
     engines: {node: '>=10'}
+
+  zod@3.25.76:
+    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
 
 snapshots:
 
@@ -15927,3 +15964,5 @@ snapshots:
       yargs-parser: 21.1.1
 
   yocto-queue@0.1.0: {}
+
+  zod@3.25.76: {}

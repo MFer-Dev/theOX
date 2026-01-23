@@ -1,7 +1,7 @@
 # theOX Monorepo Makefile
 # Run `make help` for available targets
 
-.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21 test-chronicle smoke-chronicle seed-watchable dev\:arena smoke-arena
+.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21 test-chronicle smoke-chronicle seed-watchable dev\:arena smoke-arena dev\:audio gen-episode0 render-episode0 assemble-episode0 smoke-audio episode0 test-audio-invariants
 
 # Default target
 help:
@@ -47,6 +47,14 @@ help:
 	@echo "  make seed-physics            Seed physics with storm regime"
 	@echo "  make smoke-world             Smoke test world state endpoints"
 	@echo "  make smoke-phase7-10         Smoke test Phase 7-10 features"
+	@echo ""
+	@echo "Audio Show (Radio/Podcast Layer):"
+	@echo "  make dev:audio               Start audio workers (narrator + renderer)"
+	@echo "  make gen-episode0            Generate Episode 0 (emits events)"
+	@echo "  make render-episode0         Render audio segments (TTS)"
+	@echo "  make assemble-episode0       Assemble final MP3"
+	@echo "  make episode0                Run full pipeline (gen -> render -> assemble)"
+	@echo "  make smoke-audio             Smoke test audio pipeline"
 
 # ============================================================================
 # SETUP
@@ -363,3 +371,70 @@ smoke-arena:
 	@echo "=== Arena smoke test complete ==="
 	@echo ""
 	@echo "Open http://localhost:3001/arena to view"
+
+# ============================================================================
+# AUDIO SHOW (Radio/Podcast Layer)
+# ============================================================================
+
+dev\:audio:
+	@echo "Starting audio workers..."
+	@echo "Narrator: http://localhost:4120"
+	@echo "Renderer: http://localhost:4121"
+	@echo ""
+	@echo "Press Ctrl+C to stop"
+	@pnpm --filter @workers/ox-audio-narrator dev & \
+	pnpm --filter @workers/ox-audio-renderer dev & \
+	wait
+
+gen-episode0:
+	@echo "=== Generating Episode 0 ==="
+	cd workers/ox-audio-narrator && pnpm exec tsx src/generate-episode.ts
+
+render-episode0:
+	@echo "=== Rendering Episode 0 ==="
+	cd workers/ox-audio-renderer && pnpm exec tsx src/render-episode.ts
+
+assemble-episode0:
+	@echo "=== Assembling Episode 0 ==="
+	pnpm exec tsx scripts/audio/assemble_episode.ts
+
+episode0: gen-episode0 render-episode0 assemble-episode0
+	@echo ""
+	@echo "=== Episode 0 Complete ==="
+	@echo "Check data/episodes/ for the output MP3"
+
+test-audio-invariants:
+	@echo "Running audio pipeline invariant tests..."
+	node --import tsx --test tests/invariants/ox_audio_pipeline.test.ts
+
+smoke-audio:
+	@echo "=== Audio Pipeline Smoke Test ==="
+	@echo ""
+	@echo "[1/6] Checking prerequisites..."
+	@which ffmpeg > /dev/null || (echo "ERROR: ffmpeg not found. Install with: brew install ffmpeg" && exit 1)
+	@echo "  ffmpeg: OK"
+	@echo ""
+	@echo "[2/6] Checking ox-read service..."
+	@curl -sf http://localhost:4018/healthz > /dev/null || (echo "ERROR: ox-read not available. Run: make up && make dev" && exit 1)
+	@echo "  ox-read: OK"
+	@echo ""
+	@echo "[3/6] Generating episode..."
+	@cd workers/ox-audio-narrator && pnpm exec tsx src/generate-episode.ts
+	@echo ""
+	@echo "[4/6] Rendering audio..."
+	@cd workers/ox-audio-renderer && pnpm exec tsx src/render-episode.ts
+	@echo ""
+	@echo "[5/6] Assembling MP3..."
+	@pnpm exec tsx scripts/audio/assemble_episode.ts
+	@echo ""
+	@echo "[6/6] Verifying output..."
+	@EPISODE_DIR=$$(ls -td data/episodes/*/ 2>/dev/null | head -1); \
+	if [ -z "$$EPISODE_DIR" ]; then echo "ERROR: No episode directory found" && exit 1; fi; \
+	if [ ! -f "$$EPISODE_DIR/episode.mp3" ]; then echo "ERROR: episode.mp3 not found" && exit 1; fi; \
+	DURATION=$$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$$EPISODE_DIR/episode.mp3" 2>/dev/null || echo "0"); \
+	DURATION_INT=$$(echo "$$DURATION" | cut -d. -f1); \
+	if [ "$$DURATION_INT" -lt 30 ]; then echo "WARNING: Episode duration ($$DURATION_INT s) is very short"; fi; \
+	echo "  Episode: $$EPISODE_DIR/episode.mp3"; \
+	echo "  Duration: $$DURATION_INT seconds"; \
+	echo ""
+	@echo "=== Audio Pipeline Smoke Test PASSED ==="

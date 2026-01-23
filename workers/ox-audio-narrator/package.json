@@ -1,0 +1,21 @@
+{
+  "name": "@workers/ox-audio-narrator",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint 'src/**/*.{ts,tsx}'",
+    "generate": "tsx src/generate-episode.ts"
+  },
+  "dependencies": {
+    "@platform/events": "workspace:*",
+    "@platform/shared": "workspace:*",
+    "fastify": "^4.28.1",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/uuid": "^9.0.7"
+  }
+}

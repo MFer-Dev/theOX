@@ -43,3 +43,6 @@ apps/mobile/ios/*.xcworkspace
 infra/terraform/.terraform
 infra/terraform/**/.terraform
 infra/terraform/**/.terraform.lock.hcl
+
+# Local data (audio episodes, etc.)
+data/

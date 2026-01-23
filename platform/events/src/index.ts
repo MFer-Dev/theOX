@@ -3,6 +3,9 @@ import { GenerationCohort } from '@platform/shared';
 import { Kafka, logLevel, Producer, Consumer } from 'kafkajs';
 import { Pool } from 'pg';
 
+// Re-export audio event contracts
+export * from './audio';
+
 export type EventEnvelope<TPayload = unknown> = {
   event_id: string;
   event_type: string;
