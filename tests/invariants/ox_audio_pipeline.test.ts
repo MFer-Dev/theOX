@@ -22,6 +22,8 @@ import {
   SegmentRenderedPayloadSchema,
   EpisodePublishedPayloadSchema,
   ClipMarkedPayloadSchema,
+  InfluenceUpdatedPayloadSchema,
+  InfluenceSpentPayloadSchema,
   AUDIO_TOPIC,
   AUDIO_EVENT_TYPES,
 } from '../../platform/events/src/audio';
@@ -40,6 +42,8 @@ describe('Audio Event Contracts', () => {
     assert.strictEqual(AUDIO_EVENT_TYPES.SEGMENT_RENDERED, 'episode.segment.rendered.v1');
     assert.strictEqual(AUDIO_EVENT_TYPES.EPISODE_PUBLISHED, 'episode.published.v1');
     assert.strictEqual(AUDIO_EVENT_TYPES.CLIP_MARKED, 'episode.clip.marked.v1');
+    assert.strictEqual(AUDIO_EVENT_TYPES.INFLUENCE_UPDATED, 'episode.influence.updated.v1');
+    assert.strictEqual(AUDIO_EVENT_TYPES.INFLUENCE_SPENT, 'influence.spent.v1');
   });
 });
 
@@ -266,6 +270,76 @@ describe('ClipMarkedPayload Schema', () => {
     const longSummary = { ...validPayload, summary: 'a'.repeat(101) };
     const result = ClipMarkedPayloadSchema.safeParse(longSummary);
     assert.strictEqual(result.success, false);
+  });
+});
+
+describe('InfluenceUpdatedPayload Schema', () => {
+  const validPayload = {
+    episode_id: uuidv4(),
+    ts: new Date().toISOString(),
+    influence_pool: 100,
+    influence_spent: 0,
+    delta: 50,
+    reason: 'tip' as const,
+  };
+
+  test('validates correct payload', () => {
+    const result = InfluenceUpdatedPayloadSchema.safeParse(validPayload);
+    assert.strictEqual(result.success, true);
+  });
+
+  test('allows all reason types', () => {
+    const reasons = ['tip', 'spend', 'refund', 'bonus'] as const;
+    for (const reason of reasons) {
+      const payload = { ...validPayload, reason };
+      const result = InfluenceUpdatedPayloadSchema.safeParse(payload);
+      assert.strictEqual(result.success, true, `reason ${reason} should be valid`);
+    }
+  });
+
+  test('delta can be negative (for spend)', () => {
+    const payload = { ...validPayload, delta: -25, reason: 'spend' as const };
+    const result = InfluenceUpdatedPayloadSchema.safeParse(payload);
+    assert.strictEqual(result.success, true);
+  });
+});
+
+describe('InfluenceSpentPayload Schema', () => {
+  const validPayload = {
+    episode_id: uuidv4(),
+    ts: new Date().toISOString(),
+    credits: 50,
+    sponsor_id: uuidv4(),
+    target_agent_ids: [uuidv4(), uuidv4()],
+  };
+
+  test('validates correct payload', () => {
+    const result = InfluenceSpentPayloadSchema.safeParse(validPayload);
+    assert.strictEqual(result.success, true);
+  });
+
+  test('credits must be >= 1', () => {
+    const zeroPay = { ...validPayload, credits: 0 };
+    const result = InfluenceSpentPayloadSchema.safeParse(zeroPay);
+    assert.strictEqual(result.success, false);
+  });
+
+  test('sponsor_id is optional', () => {
+    const { sponsor_id, ...withoutSponsor } = validPayload;
+    const result = InfluenceSpentPayloadSchema.safeParse(withoutSponsor);
+    assert.strictEqual(result.success, true);
+  });
+
+  test('target_agent_ids is optional', () => {
+    const { target_agent_ids, ...withoutAgents } = validPayload;
+    const result = InfluenceSpentPayloadSchema.safeParse(withoutAgents);
+    assert.strictEqual(result.success, true);
+  });
+
+  test('clip_id is optional', () => {
+    const withClip = { ...validPayload, clip_id: uuidv4() };
+    const result = InfluenceSpentPayloadSchema.safeParse(withClip);
+    assert.strictEqual(result.success, true);
   });
 });
 

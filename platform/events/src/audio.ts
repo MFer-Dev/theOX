@@ -118,6 +118,8 @@ export const EpisodeCreatedPayloadSchema = z.object({
   title: z.string(),
   synopsis_json: EpisodeSynopsisSchema,
   duration_seconds: z.number().optional(), // Estimated duration
+  influence_pool: z.number().default(0), // Listener tips accumulate here
+  influence_spent: z.number().default(0), // Credits spent from pool
 });
 
 export type EpisodeCreatedPayload = z.infer<typeof EpisodeCreatedPayloadSchema>;
@@ -152,6 +154,8 @@ export const EpisodePublishedPayloadSchema = z.object({
   audio_uri: z.string(),
   sha256: z.string(),
   duration_seconds: z.number(),
+  influence_pool: z.number().optional(), // Total tips received
+  influence_spent: z.number().optional(), // Credits distributed to agents
 });
 
 export type EpisodePublishedPayload = z.infer<typeof EpisodePublishedPayloadSchema>;
@@ -181,6 +185,40 @@ export type ClipMarkedPayload = z.infer<typeof ClipMarkedPayloadSchema>;
 export const CLIP_MARKED_EVENT_TYPE = 'episode.clip.marked.v1';
 
 // ============================================================================
+// episode.influence.updated.v1
+// ============================================================================
+
+export const InfluenceUpdatedPayloadSchema = z.object({
+  episode_id: z.string().uuid(),
+  ts: z.string().datetime(),
+  influence_pool: z.number(),
+  influence_spent: z.number(),
+  delta: z.number(), // Change in pool (positive = tip received, negative = spent)
+  reason: z.enum(['tip', 'spend', 'refund', 'bonus']),
+});
+
+export type InfluenceUpdatedPayload = z.infer<typeof InfluenceUpdatedPayloadSchema>;
+
+export const INFLUENCE_UPDATED_EVENT_TYPE = 'episode.influence.updated.v1';
+
+// ============================================================================
+// influence.spent.v1
+// ============================================================================
+
+export const InfluenceSpentPayloadSchema = z.object({
+  episode_id: z.string().uuid(),
+  ts: z.string().datetime(),
+  credits: z.number().min(1),
+  sponsor_id: z.string().uuid().optional(), // Who spent (if identified)
+  target_agent_ids: z.array(z.string().uuid()).optional(), // Featured agents to benefit
+  clip_id: z.string().uuid().optional(), // If tipping a specific clip
+});
+
+export type InfluenceSpentPayload = z.infer<typeof InfluenceSpentPayloadSchema>;
+
+export const INFLUENCE_SPENT_EVENT_TYPE = 'influence.spent.v1';
+
+// ============================================================================
 // Union type for all audio event payloads
 // ============================================================================
 
@@ -191,6 +229,8 @@ export const AudioEventPayloadSchema = z.union([
   SegmentRenderedPayloadSchema,
   EpisodePublishedPayloadSchema,
   ClipMarkedPayloadSchema,
+  InfluenceUpdatedPayloadSchema,
+  InfluenceSpentPayloadSchema,
 ]);
 
 export type AudioEventPayload = z.infer<typeof AudioEventPayloadSchema>;
@@ -206,6 +246,8 @@ export const AUDIO_EVENT_TYPES = {
   SEGMENT_RENDERED: SEGMENT_RENDERED_EVENT_TYPE,
   EPISODE_PUBLISHED: EPISODE_PUBLISHED_EVENT_TYPE,
   CLIP_MARKED: CLIP_MARKED_EVENT_TYPE,
+  INFLUENCE_UPDATED: INFLUENCE_UPDATED_EVENT_TYPE,
+  INFLUENCE_SPENT: INFLUENCE_SPENT_EVENT_TYPE,
 } as const;
 
 // ============================================================================
@@ -234,4 +276,12 @@ export const validateEpisodePublished = (payload: unknown): EpisodePublishedPayl
 
 export const validateClipMarked = (payload: unknown): ClipMarkedPayload => {
   return ClipMarkedPayloadSchema.parse(payload);
+};
+
+export const validateInfluenceUpdated = (payload: unknown): InfluenceUpdatedPayload => {
+  return InfluenceUpdatedPayloadSchema.parse(payload);
+};
+
+export const validateInfluenceSpent = (payload: unknown): InfluenceSpentPayload => {
+  return InfluenceSpentPayloadSchema.parse(payload);
 };

@@ -21,10 +21,14 @@ import {
   NARRATOR_SPEECH_EVENT_TYPE,
   AGENT_DIALOGUE_EVENT_TYPE,
   EPISODE_CREATED_EVENT_TYPE,
+  INFLUENCE_UPDATED_EVENT_TYPE,
+  INFLUENCE_SPENT_EVENT_TYPE,
   NarratorSpeechPayload,
   AgentDialoguePayload,
   EpisodeCreatedPayload,
   EpisodeSynopsis,
+  InfluenceUpdatedPayload,
+  InfluenceSpentPayload,
 } from '@platform/events';
 
 const OX_READ_URL = process.env.OX_READ_URL || 'http://localhost:4018';
@@ -36,6 +40,43 @@ const DEPLOYMENT_TARGET = process.env.DEPLOYMENT_TARGET || 'ox-sandbox';
 const NARRATOR_ACTOR_ID = '00000000-0000-0000-0000-000000000001';
 
 const app = Fastify({ logger: true });
+
+// ============================================================================
+// Influence Pool Storage (in-memory for MVP)
+// In production, this would be persisted to a database
+// ============================================================================
+
+interface EpisodeInfluence {
+  episode_id: string;
+  influence_pool: number;
+  influence_spent: number;
+  featured_agent_ids: string[];
+}
+
+const episodeInfluence = new Map<string, EpisodeInfluence>();
+
+function getEpisodeInfluence(episodeId: string): EpisodeInfluence {
+  let influence = episodeInfluence.get(episodeId);
+  if (!influence) {
+    influence = {
+      episode_id: episodeId,
+      influence_pool: 0,
+      influence_spent: 0,
+      featured_agent_ids: [],
+    };
+    episodeInfluence.set(episodeId, influence);
+  }
+  return influence;
+}
+
+function registerEpisode(episodeId: string, featuredAgentIds: string[]): void {
+  episodeInfluence.set(episodeId, {
+    episode_id: episodeId,
+    influence_pool: 0,
+    influence_spent: 0,
+    featured_agent_ids: featuredAgentIds,
+  });
+}
 
 // ============================================================================
 // Types for ox-read responses
@@ -468,6 +509,10 @@ app.post('/audio/episode0/generate', async (_request, reply) => {
     // Generate episode structure
     const { episodeId, segments, synopsis } = await generateEpisode0(arenaState);
 
+    // Register episode for influence tracking
+    const featuredAgentIds = synopsis.featured_agents.map(a => a.agent_id);
+    registerEpisode(episodeId, featuredAgentIds);
+
     // Emit all events
     await emitEpisodeEvents(episodeId, segments, synopsis, 'Episode 0: The Disappearance');
 
@@ -483,6 +528,7 @@ app.post('/audio/episode0/generate', async (_request, reply) => {
         text_preview: s.text.slice(0, 50) + '...',
       })),
       synopsis,
+      influence_pool: 0,
       next_step: 'Events emitted to events.ox-audio.v1. Run the renderer to produce audio.',
     };
   } catch (err) {
@@ -493,6 +539,112 @@ app.post('/audio/episode0/generate', async (_request, reply) => {
     });
   }
 });
+
+// ============================================================================
+// Spend Endpoint - Monetization MVP
+// ============================================================================
+
+interface SpendRequest {
+  credits: number;
+  sponsor_id?: string;
+  clip_id?: string;
+}
+
+app.post<{ Params: { episode_id: string }; Body: SpendRequest }>(
+  '/audio/episodes/:episode_id/spend',
+  async (request, reply) => {
+    const { episode_id } = request.params;
+    const { credits, sponsor_id, clip_id } = request.body;
+
+    // Validate credits
+    if (!credits || credits <= 0 || !Number.isFinite(credits)) {
+      return reply.status(400).send({
+        error: 'Invalid credits',
+        detail: 'credits must be a positive number',
+      });
+    }
+
+    // Get or create episode influence record
+    const influence = getEpisodeInfluence(episode_id);
+
+    // Update pool
+    const previousPool = influence.influence_pool;
+    influence.influence_pool += credits;
+
+    app.log.info(
+      { episode_id, credits, previousPool, newPool: influence.influence_pool },
+      'Credits added to influence pool'
+    );
+
+    const ts = new Date().toISOString();
+
+    // Emit influence.spent.v1
+    const spentPayload: InfluenceSpentPayload = {
+      episode_id,
+      ts,
+      credits,
+      sponsor_id,
+      target_agent_ids: influence.featured_agent_ids.length > 0 ? influence.featured_agent_ids : undefined,
+      clip_id,
+    };
+    const spentEvent = buildEvent(INFLUENCE_SPENT_EVENT_TYPE, spentPayload, {
+      actorId: sponsor_id || NARRATOR_ACTOR_ID,
+    });
+    await publishEvent(AUDIO_TOPIC, spentEvent);
+
+    // Emit episode.influence.updated.v1
+    const updatedPayload: InfluenceUpdatedPayload = {
+      episode_id,
+      ts,
+      influence_pool: influence.influence_pool,
+      influence_spent: influence.influence_spent,
+      delta: credits,
+      reason: 'tip',
+    };
+    const updatedEvent = buildEvent(INFLUENCE_UPDATED_EVENT_TYPE, updatedPayload, {
+      actorId: NARRATOR_ACTOR_ID,
+    });
+    await publishEvent(AUDIO_TOPIC, updatedEvent);
+
+    app.log.info(
+      { episode_id, eventType: INFLUENCE_SPENT_EVENT_TYPE },
+      'Influence spent event emitted'
+    );
+
+    return {
+      ok: true,
+      episode_id,
+      credits_added: credits,
+      influence_pool: influence.influence_pool,
+      influence_spent: influence.influence_spent,
+      featured_agent_ids: influence.featured_agent_ids,
+      message: 'Credits added to influence pool. ox-physics can subscribe to grant capacity.',
+    };
+  }
+);
+
+app.get<{ Params: { episode_id: string } }>(
+  '/audio/episodes/:episode_id/influence',
+  async (request, reply) => {
+    const { episode_id } = request.params;
+    const influence = episodeInfluence.get(episode_id);
+
+    if (!influence) {
+      return reply.status(404).send({
+        error: 'Episode not found',
+        detail: `No influence record for episode ${episode_id}`,
+      });
+    }
+
+    return {
+      ok: true,
+      episode_id,
+      influence_pool: influence.influence_pool,
+      influence_spent: influence.influence_spent,
+      featured_agent_ids: influence.featured_agent_ids,
+    };
+  }
+);
 
 // ============================================================================
 // Start
