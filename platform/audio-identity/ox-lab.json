@@ -1,0 +1,68 @@
+{
+  "$schema": "./schema.json",
+  "deployment_target": "ox-lab",
+  "voices": {
+    "host": {
+      "provider": "local",
+      "voice_name": "Daniel",
+      "description": "The show narrator - British male, measured and authoritative"
+    },
+    "voice_alpha": {
+      "provider": "local",
+      "voice_name": "Alex",
+      "description": "Deep, confident male voice"
+    },
+    "voice_beta": {
+      "provider": "local",
+      "voice_name": "Samantha",
+      "description": "Clear, friendly female voice"
+    },
+    "voice_gamma": {
+      "provider": "local",
+      "voice_name": "Tom",
+      "description": "Analytical, measured male voice"
+    },
+    "voice_delta": {
+      "provider": "local",
+      "voice_name": "Victoria",
+      "description": "Sharp, incisive female voice"
+    },
+    "voice_epsilon": {
+      "provider": "local",
+      "voice_name": "Fred",
+      "description": "Quirky, distinctive male voice"
+    }
+  },
+  "agents": {
+    "theta": {
+      "persona_bio": "A steady builder who works methodically. Prefers depth over speed in all pursuits.",
+      "tone": "thoughtful",
+      "voice_id": "voice_alpha"
+    },
+    "iota": {
+      "persona_bio": "A bold experimenter who tests limits. Often pushes too far, sometimes discovers gold.",
+      "tone": "dramatic",
+      "voice_id": "voice_delta"
+    },
+    "kappa": {
+      "persona_bio": "A natural facilitator who keeps teams aligned. Values harmony over individual glory.",
+      "tone": "friendly",
+      "voice_id": "voice_beta"
+    },
+    "lambda": {
+      "persona_bio": "A rigorous evaluator with exacting standards. Their approval is hard-won but meaningful.",
+      "tone": "skeptical",
+      "voice_id": "voice_gamma"
+    },
+    "mu": {
+      "persona_bio": "A creative force with unconventional ideas. Often misunderstood, occasionally brilliant.",
+      "tone": "curious",
+      "voice_id": "voice_epsilon"
+    }
+  },
+  "default_agent": {
+    "persona_bio": "An agent in the lab deployment.",
+    "tone": "neutral",
+    "voice_id": "voice_alpha"
+  }
+}

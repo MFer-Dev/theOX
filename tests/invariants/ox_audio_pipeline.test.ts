@@ -21,6 +21,7 @@ import {
   EpisodeCreatedPayloadSchema,
   SegmentRenderedPayloadSchema,
   EpisodePublishedPayloadSchema,
+  ClipMarkedPayloadSchema,
   AUDIO_TOPIC,
   AUDIO_EVENT_TYPES,
 } from '../../platform/events/src/audio';
@@ -38,6 +39,7 @@ describe('Audio Event Contracts', () => {
     assert.strictEqual(AUDIO_EVENT_TYPES.EPISODE_CREATED, 'episode.created.v1');
     assert.strictEqual(AUDIO_EVENT_TYPES.SEGMENT_RENDERED, 'episode.segment.rendered.v1');
     assert.strictEqual(AUDIO_EVENT_TYPES.EPISODE_PUBLISHED, 'episode.published.v1');
+    assert.strictEqual(AUDIO_EVENT_TYPES.CLIP_MARKED, 'episode.clip.marked.v1');
   });
 });
 
@@ -215,6 +217,54 @@ describe('EpisodePublishedPayload Schema', () => {
   test('requires all fields', () => {
     const { duration_seconds, ...withoutDuration } = validPayload;
     const result = EpisodePublishedPayloadSchema.safeParse(withoutDuration);
+    assert.strictEqual(result.success, false);
+  });
+});
+
+describe('ClipMarkedPayload Schema', () => {
+  const validPayload = {
+    episode_id: uuidv4(),
+    clip_id: uuidv4(),
+    ts: new Date().toISOString(),
+    start_segment_id: 'agent_line_001',
+    end_segment_id: 'agent_line_004',
+    start_seconds: 30,
+    end_seconds: 70,
+    duration_seconds: 40,
+    highlight_type: 'tension' as const,
+    summary: 'Alpha and Beta discuss the mystery',
+    featured_agent_ids: [uuidv4(), uuidv4()],
+  };
+
+  test('validates correct payload', () => {
+    const result = ClipMarkedPayloadSchema.safeParse(validPayload);
+    assert.strictEqual(result.success, true);
+  });
+
+  test('requires valid highlight_type', () => {
+    const invalid = { ...validPayload, highlight_type: 'invalid' };
+    const result = ClipMarkedPayloadSchema.safeParse(invalid);
+    assert.strictEqual(result.success, false);
+  });
+
+  test('allows all highlight types', () => {
+    const types = ['conflict', 'revelation', 'humor', 'tension', 'resolution'] as const;
+    for (const type of types) {
+      const payload = { ...validPayload, highlight_type: type };
+      const result = ClipMarkedPayloadSchema.safeParse(payload);
+      assert.strictEqual(result.success, true, `highlight_type ${type} should be valid`);
+    }
+  });
+
+  test('featured_agent_ids is optional', () => {
+    const { featured_agent_ids, ...withoutAgents } = validPayload;
+    const result = ClipMarkedPayloadSchema.safeParse(withoutAgents);
+    assert.strictEqual(result.success, true);
+  });
+
+  test('summary must be <= 100 characters', () => {
+    const longSummary = { ...validPayload, summary: 'a'.repeat(101) };
+    const result = ClipMarkedPayloadSchema.safeParse(longSummary);
     assert.strictEqual(result.success, false);
   });
 });

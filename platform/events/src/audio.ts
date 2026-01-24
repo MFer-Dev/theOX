@@ -159,6 +159,28 @@ export type EpisodePublishedPayload = z.infer<typeof EpisodePublishedPayloadSche
 export const EPISODE_PUBLISHED_EVENT_TYPE = 'episode.published.v1';
 
 // ============================================================================
+// episode.clip.marked.v1
+// ============================================================================
+
+export const ClipMarkedPayloadSchema = z.object({
+  episode_id: z.string().uuid(),
+  clip_id: z.string().uuid(),
+  ts: z.string().datetime(),
+  start_segment_id: z.string(),
+  end_segment_id: z.string(),
+  start_seconds: z.number(),
+  end_seconds: z.number(),
+  duration_seconds: z.number(),
+  highlight_type: z.enum(['conflict', 'revelation', 'humor', 'tension', 'resolution']),
+  summary: z.string().max(100),
+  featured_agent_ids: z.array(z.string().uuid()).optional(),
+});
+
+export type ClipMarkedPayload = z.infer<typeof ClipMarkedPayloadSchema>;
+
+export const CLIP_MARKED_EVENT_TYPE = 'episode.clip.marked.v1';
+
+// ============================================================================
 // Union type for all audio event payloads
 // ============================================================================
 
@@ -168,6 +190,7 @@ export const AudioEventPayloadSchema = z.union([
   EpisodeCreatedPayloadSchema,
   SegmentRenderedPayloadSchema,
   EpisodePublishedPayloadSchema,
+  ClipMarkedPayloadSchema,
 ]);
 
 export type AudioEventPayload = z.infer<typeof AudioEventPayloadSchema>;
@@ -182,6 +205,7 @@ export const AUDIO_EVENT_TYPES = {
   EPISODE_CREATED: EPISODE_CREATED_EVENT_TYPE,
   SEGMENT_RENDERED: SEGMENT_RENDERED_EVENT_TYPE,
   EPISODE_PUBLISHED: EPISODE_PUBLISHED_EVENT_TYPE,
+  CLIP_MARKED: CLIP_MARKED_EVENT_TYPE,
 } as const;
 
 // ============================================================================
@@ -206,4 +230,8 @@ export const validateSegmentRendered = (payload: unknown): SegmentRenderedPayloa
 
 export const validateEpisodePublished = (payload: unknown): EpisodePublishedPayload => {
   return EpisodePublishedPayloadSchema.parse(payload);
+};
+
+export const validateClipMarked = (payload: unknown): ClipMarkedPayload => {
+  return ClipMarkedPayloadSchema.parse(payload);
 };

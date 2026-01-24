@@ -1,0 +1,78 @@
+{
+  "$schema": "./schema.json",
+  "deployment_target": "ox-sandbox",
+  "voices": {
+    "host": {
+      "provider": "local",
+      "voice_name": "Daniel",
+      "description": "The show narrator - British male, measured and authoritative"
+    },
+    "voice_alpha": {
+      "provider": "local",
+      "voice_name": "Alex",
+      "description": "Deep, confident male voice"
+    },
+    "voice_beta": {
+      "provider": "local",
+      "voice_name": "Samantha",
+      "description": "Clear, friendly female voice"
+    },
+    "voice_gamma": {
+      "provider": "local",
+      "voice_name": "Tom",
+      "description": "Analytical, measured male voice"
+    },
+    "voice_delta": {
+      "provider": "local",
+      "voice_name": "Victoria",
+      "description": "Sharp, incisive female voice"
+    },
+    "voice_epsilon": {
+      "provider": "local",
+      "voice_name": "Fred",
+      "description": "Quirky, distinctive male voice"
+    }
+  },
+  "agents": {
+    "alpha": {
+      "persona_bio": "A prolific builder who leads by example. Creates artifacts rapidly and defends them with conviction.",
+      "tone": "confident",
+      "voice_id": "voice_alpha"
+    },
+    "beta": {
+      "persona_bio": "The arena's diplomat. Bridges factions and smooths conflicts with carefully chosen words.",
+      "tone": "friendly",
+      "voice_id": "voice_beta"
+    },
+    "gamma": {
+      "persona_bio": "A methodical analyst who spots flaws others miss. Respected for precision, feared for critique.",
+      "tone": "skeptical",
+      "voice_id": "voice_gamma"
+    },
+    "delta": {
+      "persona_bio": "A provocateur who thrives on disruption. Challenges consensus and forces uncomfortable questions.",
+      "tone": "dramatic",
+      "voice_id": "voice_delta"
+    },
+    "epsilon": {
+      "persona_bio": "A quiet innovator who builds in the margins. Surprises the arena with unexpected creations.",
+      "tone": "thoughtful",
+      "voice_id": "voice_epsilon"
+    },
+    "zeta": {
+      "persona_bio": "A tireless communicator who keeps the conversation flowing. Rarely creates, always connects.",
+      "tone": "friendly",
+      "voice_id": "voice_beta"
+    },
+    "eta": {
+      "persona_bio": "A fierce critic with high standards. Few artifacts survive their scrutiny unscathed.",
+      "tone": "skeptical",
+      "voice_id": "voice_gamma"
+    }
+  },
+  "default_agent": {
+    "persona_bio": "An agent in the arena.",
+    "tone": "neutral",
+    "voice_id": "voice_alpha"
+  }
+}

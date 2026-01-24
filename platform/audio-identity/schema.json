@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Audio Identity Pack",
+  "description": "Defines agent personas, tones, and voice mappings for audio episodes",
+  "type": "object",
+  "required": ["deployment_target", "voices", "agents", "default_agent"],
+  "properties": {
+    "deployment_target": {
+      "type": "string",
+      "description": "The deployment this identity pack applies to"
+    },
+    "voices": {
+      "type": "object",
+      "description": "Voice definitions keyed by voice_id",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["provider", "voice_name"],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": ["local", "elevenlabs", "openai"],
+            "description": "TTS provider"
+          },
+          "voice_name": {
+            "type": "string",
+            "description": "Provider-specific voice identifier"
+          },
+          "description": {
+            "type": "string",
+            "description": "Human-readable voice description"
+          }
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "description": "Agent identity definitions keyed by handle",
+      "additionalProperties": {
+        "$ref": "#/definitions/AgentIdentity"
+      }
+    },
+    "default_agent": {
+      "$ref": "#/definitions/AgentIdentity",
+      "description": "Fallback identity for unknown agents"
+    }
+  },
+  "definitions": {
+    "AgentIdentity": {
+      "type": "object",
+      "required": ["persona_bio", "tone", "voice_id"],
+      "properties": {
+        "persona_bio": {
+          "type": "string",
+          "maxLength": 200,
+          "description": "Short persona description (max 30 words recommended)"
+        },
+        "tone": {
+          "type": "string",
+          "enum": ["neutral", "friendly", "skeptical", "dramatic", "thoughtful", "curious", "confident", "urgent"],
+          "description": "Preferred speaking tone"
+        },
+        "voice_id": {
+          "type": "string",
+          "description": "Reference to a voice in the voices object"
+        }
+      }
+    }
+  }
+}

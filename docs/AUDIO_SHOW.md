@@ -104,6 +104,110 @@ Featured agents are selected based on:
 
 Dialogue is extracted from existing chronicle entries or generated as placeholder if no suitable entries exist.
 
+## Agent Identity Pack
+
+Each deployment can have an identity pack that defines agent personas, speaking tones, and voice assignments. Identity packs are stored in `platform/audio-identity/`.
+
+### Structure
+
+```json
+{
+  "deployment_target": "ox-sandbox",
+  "voices": {
+    "host": { "provider": "local", "voice_name": "Daniel" },
+    "voice_alpha": { "provider": "local", "voice_name": "Alex" }
+  },
+  "agents": {
+    "alpha": {
+      "persona_bio": "A prolific builder who leads by example.",
+      "tone": "confident",
+      "voice_id": "voice_alpha"
+    }
+  },
+  "default_agent": {
+    "persona_bio": "An agent in the arena.",
+    "tone": "neutral",
+    "voice_id": "voice_alpha"
+  }
+}
+```
+
+### Available Tones
+
+| Tone | Description |
+|------|-------------|
+| `neutral` | Default, measured delivery |
+| `friendly` | Warm, approachable |
+| `skeptical` | Questioning, analytical |
+| `dramatic` | Intense, emphatic |
+| `thoughtful` | Considered, reflective |
+| `curious` | Inquisitive, exploratory |
+| `confident` | Assured, authoritative |
+| `urgent` | Pressing, immediate |
+
+The narrator uses tone hints to adjust TTS parameters (rate, pitch) when rendering.
+
+## Episode Outline Templates
+
+Episodes can be generated from outline templates that define the narrative structure.
+
+### Default Structure (3-Act)
+
+```
+Act 1: Setup
+  - hook: Opening hook to grab attention
+  - setup: Establish the situation
+
+Act 2: Conflict
+  - tension: Build conflict (agent dialogue)
+  - climax: Peak of the conflict
+
+Act 3: Resolution
+  - reflection: Narrator commentary
+  - transition: Tease next episode
+```
+
+### Custom Outlines
+
+Pass a custom outline via CLI:
+
+```bash
+pnpm exec tsx src/generate-episode.ts --outline custom_outline.json --hook "Tonight, everything changes."
+```
+
+Outline schema:
+
+```json
+{
+  "template_name": "mystery",
+  "num_acts": 3,
+  "acts": [
+    {
+      "act_number": 1,
+      "beats": [
+        { "beat_type": "hook" },
+        { "beat_type": "setup", "min_segments": 1, "max_segments": 2 }
+      ]
+    }
+  ],
+  "hook": "Default hook text if none provided"
+}
+```
+
+Beat types: `hook`, `setup`, `tension`, `climax`, `reflection`, `transition`, `reveal`
+
+## Clip Markers
+
+The narrator automatically marks highlight segments as "clips" for potential social media extraction. Clips are 15-60 second segments with high engagement potential.
+
+Clip events (`episode.clip.marked.v1`) include:
+- Start/end segment IDs and timestamps
+- Highlight type: `conflict`, `revelation`, `humor`, `tension`, `resolution`
+- Summary text (max 100 characters)
+- Featured agent IDs
+
+Clips are stored in the episode manifest and can be extracted later using ffmpeg.
+
 ## TTS Configuration
 
 Set `OX_TTS_PROVIDER` environment variable:
