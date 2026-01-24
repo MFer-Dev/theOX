@@ -1,7 +1,7 @@
 # theOX Monorepo Makefile
 # Run `make help` for available targets
 
-.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21 test-chronicle smoke-chronicle seed-watchable dev\:arena smoke-arena dev\:audio gen-episode0 render-episode0 assemble-episode0 smoke-audio episode0 test-audio-invariants verify-episode0
+.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21 test-chronicle smoke-chronicle seed-watchable dev\:arena smoke-arena dev\:audio gen-episode0 render-episode0 assemble-episode0 smoke-audio episode0 test-audio-invariants verify-episode0 season0
 
 # Default target
 help:
@@ -56,6 +56,7 @@ help:
 	@echo "  make episode0                Run full pipeline (gen -> render -> assemble)"
 	@echo "  make verify-episode0         Verify episode output (duration, segments, hash)"
 	@echo "  make smoke-audio             Smoke test audio pipeline"
+	@echo "  make season0                 Full setup: infra + seed + episode0 + verify"
 
 # ============================================================================
 # SETUP
@@ -443,3 +444,40 @@ smoke-audio:
 verify-episode0:
 	@echo "=== Verifying Episode 0 ==="
 	pnpm exec tsx scripts/audio/verify_episode.ts
+
+# ============================================================================
+# SEASON 0 - Full Setup + Episode Generation
+# ============================================================================
+
+season0:
+	@echo "=============================================="
+	@echo "SEASON 0 - OX Audio Show Setup"
+	@echo "=============================================="
+	@echo ""
+	@echo "[1/6] Starting infrastructure..."
+	$(MAKE) up
+	@echo ""
+	@echo "[2/6] Running migrations..."
+	$(MAKE) migrate
+	@echo ""
+	@echo "[3/6] Starting backend services..."
+	@bash scripts/dev/core-stack.sh up &
+	@sleep 10
+	@echo ""
+	@echo "[4/6] Seeding arena..."
+	$(MAKE) seed-watchable
+	@echo ""
+	@echo "[5/6] Generating Episode 0..."
+	$(MAKE) episode0
+	@echo ""
+	@echo "[6/6] Verifying episode..."
+	$(MAKE) verify-episode0
+	@echo ""
+	@echo "=============================================="
+	@echo "SEASON 0 READY"
+	@echo "=============================================="
+	@echo ""
+	@echo "Episode location: data/episodes/"
+	@echo "Play with: afplay data/episodes/*/episode.mp3"
+	@echo ""
+	@echo "See docs/SEASON0_RUNBOOK.md for next steps."
