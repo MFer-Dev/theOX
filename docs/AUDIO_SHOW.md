@@ -226,4 +226,63 @@ The renderer primarily operates as an event consumer, not via HTTP.
 | `render-episode0` | Render audio segments via TTS |
 | `assemble-episode0` | Assemble final MP3 |
 | `episode0` | Full pipeline (all three stages) |
+| `verify-episode0` | Verify episode output meets requirements |
 | `smoke-audio` | End-to-end smoke test |
+| `test-audio-invariants` | Run audio pipeline invariant tests |
+
+## Verification
+
+After generating an episode, run verification to ensure the output meets quality requirements:
+
+```bash
+make verify-episode0
+```
+
+### Verification Checks
+
+| Check | Requirement | Description |
+|-------|-------------|-------------|
+| MP3 exists | Required | `episode.mp3` file must exist |
+| Duration | >= 30 seconds | Episode must be at least 30 seconds long |
+| File size | > 0 bytes | MP3 must not be empty |
+| SHA256 | Computable | Hash computed for artifact integrity |
+| Segments | >= 4 | At least 4 segments (narrator + agents) |
+| Manifest status | `published` | Manifest must show completed status |
+
+### Verification Output
+
+```
+============================================================
+EPISODE VERIFICATION REPORT
+============================================================
+
+Episode ID:       08aec069-f080-40c1-aa10-7f7ce8bd3f2f
+MP3 Exists:       YES
+Duration:         61s
+File Size:        573440 bytes (560 KB)
+SHA256:           a1b2c3d4e5f6...
+Segments:         8
+Manifest Status:  published
+
+============================================================
+VERIFICATION PASSED
+============================================================
+```
+
+### JSON Output
+
+For CI/automation, set `JSON_OUTPUT=1` to get structured output:
+
+```bash
+JSON_OUTPUT=1 pnpm exec tsx scripts/audio/verify_episode.ts
+```
+
+### Programmatic Usage
+
+The verification script can be called with a specific episode ID:
+
+```bash
+pnpm exec tsx scripts/audio/verify_episode.ts [episode_id]
+```
+
+If no ID is provided, it verifies the most recently created episode.

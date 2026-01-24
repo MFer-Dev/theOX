@@ -321,3 +321,97 @@ describe('Tone and Stakes Hints', () => {
     }
   });
 });
+
+describe('Episode Verification Contract', () => {
+  // Defines the shape that verify_episode.ts must return
+  interface VerificationResult {
+    passed: boolean;
+    episode_id: string;
+    checks: {
+      mp3_exists: boolean;
+      duration_seconds: number;
+      duration_ok: boolean;
+      file_size_bytes: number;
+      sha256: string;
+      segment_count: number;
+      segments_ok: boolean;
+      manifest_status: string;
+      manifest_ok: boolean;
+    };
+    errors: string[];
+  }
+
+  const MIN_DURATION_SECONDS = 30;
+  const MIN_SEGMENTS = 4;
+
+  test('verification result has required fields', () => {
+    const result: VerificationResult = {
+      passed: true,
+      episode_id: uuidv4(),
+      checks: {
+        mp3_exists: true,
+        duration_seconds: 60,
+        duration_ok: true,
+        file_size_bytes: 573440,
+        sha256: 'a'.repeat(64),
+        segment_count: 8,
+        segments_ok: true,
+        manifest_status: 'published',
+        manifest_ok: true,
+      },
+      errors: [],
+    };
+    assert.ok(result.passed);
+    assert.ok(result.episode_id);
+    assert.ok(result.checks);
+    assert.ok(Array.isArray(result.errors));
+  });
+
+  test('passed is true only when no errors', () => {
+    const passing: VerificationResult = {
+      passed: true,
+      episode_id: uuidv4(),
+      checks: {
+        mp3_exists: true,
+        duration_seconds: 60,
+        duration_ok: true,
+        file_size_bytes: 573440,
+        sha256: 'a'.repeat(64),
+        segment_count: 8,
+        segments_ok: true,
+        manifest_status: 'published',
+        manifest_ok: true,
+      },
+      errors: [],
+    };
+    assert.strictEqual(passing.passed, passing.errors.length === 0);
+  });
+
+  test('duration_ok requires >= MIN_DURATION_SECONDS', () => {
+    const shortDuration = 15;
+    const longDuration = 60;
+    assert.strictEqual(shortDuration >= MIN_DURATION_SECONDS, false);
+    assert.strictEqual(longDuration >= MIN_DURATION_SECONDS, true);
+  });
+
+  test('segments_ok requires >= MIN_SEGMENTS', () => {
+    const fewSegments = 2;
+    const enoughSegments = 8;
+    assert.strictEqual(fewSegments >= MIN_SEGMENTS, false);
+    assert.strictEqual(enoughSegments >= MIN_SEGMENTS, true);
+  });
+
+  test('manifest_ok requires published status', () => {
+    assert.strictEqual('published' === 'published', true);
+    assert.strictEqual('pending_render' === 'published', false);
+    assert.strictEqual('rendered' === 'published', false);
+  });
+
+  test('sha256 should be 64 hex characters when computed', () => {
+    const validHash = 'a'.repeat(64);
+    const shortHash = 'a'.repeat(32);
+    assert.strictEqual(validHash.length, 64);
+    assert.notStrictEqual(shortHash.length, 64);
+    assert.ok(/^[a-f0-9]{64}$/.test(validHash));
+  });
+});

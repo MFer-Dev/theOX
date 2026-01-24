@@ -28,6 +28,7 @@ import {
 } from '@platform/events';
 
 const OX_READ_URL = process.env.OX_READ_URL || 'http://localhost:4018';
+const AGENTS_URL = process.env.AGENTS_URL || 'http://localhost:4017';
 const NARRATOR_PORT = Number(process.env.NARRATOR_PORT || 4120);
 const DEPLOYMENT_TARGET = process.env.DEPLOYMENT_TARGET || 'ox-sandbox';
 
@@ -73,18 +74,30 @@ interface ArenaState {
 }
 
 // ============================================================================
-// Fetch arena state from ox-read
+// Fetch arena state from services
 // ============================================================================
 
 async function fetchArenaState(): Promise<ArenaState> {
   const [agentsRes, sessionsRes, chronicleRes, conflictsRes] = await Promise.all([
-    fetch(`${OX_READ_URL}/ox/agents?deployment=${DEPLOYMENT_TARGET}&limit=20`),
+    // Agents come from the agents service admin endpoint
+    fetch(`${AGENTS_URL}/admin/agents`, { headers: { 'x-ops-role': 'narrator' } }),
     fetch(`${OX_READ_URL}/ox/sessions?deployment=${DEPLOYMENT_TARGET}&limit=20`),
     fetch(`${OX_READ_URL}/ox/chronicle?deployment=${DEPLOYMENT_TARGET}&limit=100`),
     fetch(`${OX_READ_URL}/ox/deployments/${DEPLOYMENT_TARGET}/conflict-chains?limit=10`),
   ]);
 
-  const agents = agentsRes.ok ? ((await agentsRes.json()) as { agents?: AgentInfo[] }).agents || [] : [];
+  // Transform agents data and filter by deployment
+  const allAgents = agentsRes.ok
+    ? ((await agentsRes.json()) as { agents?: Array<{ id: string; handle: string; deployment_target: string }> }).agents || []
+    : [];
+  const agents: AgentInfo[] = allAgents
+    .filter(a => a.deployment_target === DEPLOYMENT_TARGET)
+    .map(a => ({
+      agent_id: a.id,
+      handle: a.handle,
+      deployment_target: a.deployment_target,
+    }));
+
   const sessions = sessionsRes.ok ? ((await sessionsRes.json()) as { sessions?: SessionInfo[] }).sessions || [] : [];
   const chronicle = chronicleRes.ok ? ((await chronicleRes.json()) as ChronicleEntry[]) : [];
   const conflicts = conflictsRes.ok ? ((await conflictsRes.json()) as { conflict_chains?: unknown[] }).conflict_chains || [] : [];

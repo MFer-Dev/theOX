@@ -1,7 +1,7 @@
 # theOX Monorepo Makefile
 # Run `make help` for available targets
 
-.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21 test-chronicle smoke-chronicle seed-watchable dev\:arena smoke-arena dev\:audio gen-episode0 render-episode0 assemble-episode0 smoke-audio episode0 test-audio-invariants
+.PHONY: help install up down dev dev\:ops dev\:mobile lint typecheck format test smoke clean build migrate seed-ox replay-ox sim-throughput test-invariants test-physics-invariants test-world-invariants test-replay-invariants seed-physics smoke-world test-sponsor-policies test-arena-actions test-economy test-foundry smoke-phase7-10 test-pressure-braids test-phase12-20 test-phase21-24 smoke-phase21 test-chronicle smoke-chronicle seed-watchable dev\:arena smoke-arena dev\:audio gen-episode0 render-episode0 assemble-episode0 smoke-audio episode0 test-audio-invariants verify-episode0
 
 # Default target
 help:
@@ -54,6 +54,7 @@ help:
 	@echo "  make render-episode0         Render audio segments (TTS)"
 	@echo "  make assemble-episode0       Assemble final MP3"
 	@echo "  make episode0                Run full pipeline (gen -> render -> assemble)"
+	@echo "  make verify-episode0         Verify episode output (duration, segments, hash)"
 	@echo "  make smoke-audio             Smoke test audio pipeline"
 
 # ============================================================================
@@ -438,3 +439,7 @@ smoke-audio:
 	echo "  Duration: $$DURATION_INT seconds"; \
 	echo ""
 	@echo "=== Audio Pipeline Smoke Test PASSED ==="
+
+verify-episode0:
+	@echo "=== Verifying Episode 0 ==="
+	pnpm exec tsx scripts/audio/verify_episode.ts

@@ -29,6 +29,7 @@ import {
 } from '@platform/events';
 
 const OX_READ_URL = process.env.OX_READ_URL || 'http://localhost:4018';
+const AGENTS_URL = process.env.AGENTS_URL || 'http://localhost:4017';
 const DEPLOYMENT_TARGET = process.env.DEPLOYMENT_TARGET || 'ox-sandbox';
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), '..', '..', 'data');
 
@@ -112,9 +113,9 @@ function getVoiceId(agentId: string): string {
 }
 
 async function fetchArenaState(): Promise<ArenaState> {
-  const fetchJson = async (url: string) => {
+  const fetchJson = async (url: string, headers?: Record<string, string>) => {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { headers });
       return res.ok ? await res.json() : null;
     } catch {
       return null;
@@ -122,14 +123,25 @@ async function fetchArenaState(): Promise<ArenaState> {
   };
 
   const [agentsData, sessionsData, chronicle, conflictsData] = await Promise.all([
-    fetchJson(`${OX_READ_URL}/ox/agents?deployment=${DEPLOYMENT_TARGET}&limit=20`),
+    // Agents come from the agents service admin endpoint
+    fetchJson(`${AGENTS_URL}/admin/agents`, { 'x-ops-role': 'narrator' }),
     fetchJson(`${OX_READ_URL}/ox/sessions?deployment=${DEPLOYMENT_TARGET}&limit=20`),
     fetchJson(`${OX_READ_URL}/ox/chronicle?deployment=${DEPLOYMENT_TARGET}&limit=100`),
     fetchJson(`${OX_READ_URL}/ox/deployments/${DEPLOYMENT_TARGET}/conflict-chains?limit=10`),
   ]);
 
+  // Transform agents data to match expected format and filter by deployment
+  const allAgents = (agentsData as { agents?: Array<{ id: string; handle: string; deployment_target: string }> })?.agents || [];
+  const filteredAgents: AgentInfo[] = allAgents
+    .filter(a => a.deployment_target === DEPLOYMENT_TARGET)
+    .map(a => ({
+      agent_id: a.id,
+      handle: a.handle,
+      deployment_target: a.deployment_target,
+    }));
+
   return {
-    agents: (agentsData as { agents?: AgentInfo[] })?.agents || [],
+    agents: filteredAgents,
     sessions: (sessionsData as { sessions?: SessionInfo[] })?.sessions || [],
     chronicle: Array.isArray(chronicle) ? chronicle : [],
     conflicts: (conflictsData as { conflict_chains?: unknown[] })?.conflict_chains || [],
